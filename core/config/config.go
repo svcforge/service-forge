@@ -31,9 +31,21 @@ type GRPCConfig struct {
 }
 
 type GatewayConfig struct {
-	ListenIP              string `yaml:"listen_ip" json:"listen_ip"`
-	Port                  int    `yaml:"port" json:"port"`
-	DisableStartupMessage bool   `yaml:"disable_startup_message" json:"disable_startup_message"`
+	ListenIP              string               `yaml:"listen_ip" json:"listen_ip"`
+	Port                  int                  `yaml:"port" json:"port"`
+	DisableStartupMessage bool                 `yaml:"disable_startup_message" json:"disable_startup_message"`
+	Routes                []GatewayRouteConfig `yaml:"routes" json:"routes"`
+}
+
+type GatewayRouteConfig struct {
+	Name     string        `yaml:"name" json:"name"`
+	Method   string        `yaml:"method" json:"method"`
+	Path     string        `yaml:"path" json:"path"`
+	Service  string        `yaml:"service" json:"service"`
+	Target   string        `yaml:"target" json:"target"`
+	RPC      string        `yaml:"rpc" json:"rpc"`
+	Timeout  time.Duration `yaml:"timeout" json:"timeout"`
+	PoolSize int           `yaml:"pool_size" json:"pool_size"`
 }
 
 type LogConfig struct {

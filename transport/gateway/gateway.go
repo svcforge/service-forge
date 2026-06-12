@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -10,16 +11,20 @@ import (
 	"github.com/svcforge/service-forge/core/config"
 	sferrors "github.com/svcforge/service-forge/core/errors"
 	"github.com/svcforge/service-forge/core/module"
+	"github.com/svcforge/service-forge/ports/registry"
+	"github.com/svcforge/service-forge/transport/grpcclient"
+	"google.golang.org/grpc"
 )
 
 type HandlerFunc func(ctx context.Context, c *fiber.Ctx) (any, error)
 type RouteFunc func(app *fiber.App, gateway *Gateway)
 
 type Gateway struct {
-	app     *fiber.App
-	logger  module.Logger
-	routes  []RouteFunc
-	address string
+	app              *fiber.App
+	logger           module.Logger
+	routes           []RouteFunc
+	configuredRoutes []*proxyRoute
+	address          string
 }
 
 func New(routes ...RouteFunc) *Gateway {
@@ -40,11 +45,62 @@ func (g *Gateway) Init(ctx context.Context, runtime module.Runtime) error {
 	g.app.Get("/health", func(c *fiber.Ctx) error {
 		return c.JSON(sferrors.Success(map[string]string{"status": "ok"}))
 	})
+	if err := g.mountConfiguredRoutes(ctx, cfg, runtime); err != nil {
+		return err
+	}
 	for _, route := range g.routes {
 		route(g.app, g)
 	}
 	runtime.Set("gateway", g)
 	runtime.Set("fiber", g.app)
+	return nil
+}
+
+func (g *Gateway) mountConfiguredRoutes(ctx context.Context, cfg *config.Config, runtime module.Runtime) error {
+	if len(cfg.Gateway.Routes) == 0 {
+		return nil
+	}
+	var resolver registry.Resolver
+	if raw, ok := runtime.Get("resolver"); ok {
+		if candidate, ok := raw.(registry.Resolver); ok {
+			resolver = candidate
+		}
+	}
+	proxy := newGRPCProxy(grpcclient.NewDialer(resolver))
+	for _, routeCfg := range cfg.Gateway.Routes {
+		route, err := newProxyRoute(routeCfg)
+		if err != nil {
+			return err
+		}
+		invoker, ok := lookupProxyInvoker(route.fullRPC)
+		if !ok {
+			return sferrors.New(sferrors.CodeFailedPrecondition, "grpc proxy invoker is not registered").
+				WithDetails("rpc", route.fullRPC)
+		}
+		route.invoker = invoker
+		if strings.TrimSpace(route.cfg.Target) != "" {
+			poolSize := route.cfg.PoolSize
+			if poolSize <= 0 {
+				poolSize = 1
+			}
+			route.conns = make([]*grpc.ClientConn, 0, poolSize)
+			for i := 0; i < poolSize; i++ {
+				conn, err := proxy.dialer.DialTargetFresh(ctx, route.cfg.Target)
+				if err != nil {
+					return sferrors.New(sferrors.CodeUnavailable, "grpc target unavailable").WithCause(err)
+				}
+				route.conns = append(route.conns, conn)
+			}
+		}
+		g.configuredRoutes = append(g.configuredRoutes, route)
+		method := strings.ToUpper(route.cfg.Method)
+		g.app.Add(method, route.cfg.Path, g.Handle(func(ctx context.Context, c *fiber.Ctx) (any, error) {
+			return proxy.Invoke(ctx, c, route)
+		}))
+		if g.logger != nil {
+			g.logger.Info("mounted grpc proxy route", "method", method, "path", route.cfg.Path, "rpc", route.fullRPC)
+		}
+	}
 	return nil
 }
 
@@ -59,7 +115,15 @@ func (g *Gateway) Start(ctx context.Context) error {
 }
 
 func (g *Gateway) Stop(ctx context.Context) error {
-	return g.app.ShutdownWithContext(ctx)
+	err := g.app.ShutdownWithContext(ctx)
+	for _, route := range g.configuredRoutes {
+		for _, conn := range route.conns {
+			if closeErr := conn.Close(); err == nil && closeErr != nil {
+				err = closeErr
+			}
+		}
+	}
+	return err
 }
 
 func (g *Gateway) Health(ctx context.Context) error {
@@ -84,6 +148,9 @@ func (g *Gateway) Handle(handler HandlerFunc) fiber.Handler {
 				appErr = err.(*sferrors.AppError)
 			}
 			return c.Status(appErr.HTTPStatus).JSON(sferrors.Failure(appErr))
+		}
+		if _, ok := data.(handledResponse); ok {
+			return nil
 		}
 		return c.Status(fiber.StatusOK).JSON(sferrors.Success(data))
 	}

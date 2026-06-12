@@ -47,6 +47,10 @@ func (d *Dialer) DialTarget(ctx context.Context, target string) (*grpc.ClientCon
 	return conn, nil
 }
 
+func (d *Dialer) DialTargetFresh(_ context.Context, target string) (*grpc.ClientConn, error) {
+	return grpc.NewClient(target, d.options...)
+}
+
 func (d *Dialer) DialService(ctx context.Context, serviceName string) (*grpc.ClientConn, error) {
 	if d.resolver == nil {
 		return d.DialTarget(ctx, serviceName)

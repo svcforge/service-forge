@@ -175,6 +175,17 @@ gateway:
   listen_ip: 0.0.0.0
   port: 8080
   disable_startup_message: true
+  routes:
+    # Configure REST/JSON to gRPC proxy routes here.
+    # For local multi-process development with memory registry, use target.
+    # With consul or another shared registry, use service instead.
+    # - name: example-ping
+    #   method: POST
+    #   path: /api/v1/ping
+    #   target: 127.0.0.1:9000
+    #   rpc: /example.v1.ExampleService/Ping
+    #   pool_size: 1
+    #   timeout: 3s
 
 log:
   format: text

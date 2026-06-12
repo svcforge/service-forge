@@ -124,6 +124,94 @@ services/<service>/
 Business services should expose gRPC only. REST/JSON routes belong in the
 gateway.
 
+## Configure API To gRPC Routes
+
+Gateway can mount REST/JSON routes from config and proxy them to gRPC methods.
+The configured `rpc` is resolved through a static proxy invoker registered in
+the gateway binary. This keeps the request path on generated protobuf Go code
+instead of gRPC server reflection or runtime descriptors.
+
+```yaml
+gateway:
+  routes:
+    - name: example-ping
+      method: POST
+      path: /api/v1/ping
+      target: 127.0.0.1:9000
+      rpc: /example.v1.ExampleService/Ping
+      pool_size: 1
+      timeout: 3s
+```
+
+Use `target` for a direct `host:port` backend. Use `service` when the gateway
+should resolve a backend through a shared registry such as Consul:
+
+```yaml
+gateway:
+  routes:
+    - method: POST
+      path: /api/v1/ping
+      service: example-service
+      rpc: /example.v1.ExampleService/Ping
+```
+
+Request JSON body, query parameters, and path parameters are merged into the
+protobuf request by field name. For example, `/api/v1/users/:id` can populate an
+`id` field on the gRPC request message. The response is encoded as the standard
+Service Forge JSON response envelope.
+
+Each configured `rpc` must have a static proxy invoker registered by the gateway
+binary. In generated projects this registration should live next to the gateway
+entrypoint after protobuf code generation:
+
+```go
+gateway.MustRegisterProxyInvoker("/example.v1.ExampleService/Ping", gateway.NewUnaryProxy(
+	func() *examplev1.PingRequest {
+		return &examplev1.PingRequest{}
+	},
+	func(ctx context.Context, conn *grpc.ClientConn, req *examplev1.PingRequest) (*examplev1.PingResponse, error) {
+		return examplev1.NewExampleServiceClient(conn).Ping(ctx, req)
+	},
+))
+```
+
+For performance-sensitive routes, generated code should use `NewUnaryCodecProxy`
+and provide static request binding plus response JSON writing:
+
+```go
+gateway.MustRegisterProxyInvoker("/example.v1.ExampleService/Ping", gateway.NewUnaryCodecProxy(
+	func() *examplev1.PingRequest {
+		return &examplev1.PingRequest{}
+	},
+	func() *examplev1.PingResponse {
+		return &examplev1.PingResponse{}
+	},
+	func(c *fiber.Ctx, req *examplev1.PingRequest) error {
+		// Generated code should bind body/query/path fields directly.
+		return nil
+	},
+	func(ctx context.Context, conn *grpc.ClientConn, req *examplev1.PingRequest, resp *examplev1.PingResponse) error {
+		return conn.Invoke(ctx, "/example.v1.ExampleService/Ping", req, resp)
+	},
+	func(c *fiber.Ctx, resp *examplev1.PingResponse) error {
+		// Generated code should write response JSON directly.
+		return gateway.WriteSuccessJSON(c, []byte(`{"message":"pong"}`))
+	},
+))
+```
+
+The gateway does not use gRPC server reflection or dynamic protobuf descriptors
+for configured proxy routes. Config selects the HTTP route and backend; static
+generated Go code performs the protobuf request binding and gRPC client call.
+
+`pool_size` controls the number of gRPC client connections created for a direct
+`target`. Keep it at `1` unless profiling shows a single HTTP/2 connection is a
+contention point for your workload.
+
+For local multi-process development, `registry: memory` is process-local. Use
+`target` directly or switch to a shared registry provider before relying on
+`service` discovery across processes.
+
 ## Generate Protobuf Code
 
 Service Forge creates `buf.yaml` and `buf.gen.yaml`.
@@ -257,6 +345,17 @@ The command checks that the current project has the basic Service Forge layout:
 - `go.mod`
 - `config/`
 - `api/proto/`
+
+## Benchmarks
+
+Run standard Go benchmarks with allocation reporting:
+
+```bash
+go test ./transport/gateway -run '^$' -bench . -benchmem
+```
+
+The gateway benchmarks cover configured REST/JSON to gRPC proxy calls in both
+single-threaded and parallel hot-path scenarios.
 
 ## Package Map
 
