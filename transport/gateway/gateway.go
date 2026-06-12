@@ -12,9 +12,15 @@ import (
 	sferrors "github.com/svcforge/service-forge/core/errors"
 	"github.com/svcforge/service-forge/core/module"
 	"github.com/svcforge/service-forge/ports/registry"
+	"github.com/svcforge/service-forge/transport/gateway/plugin"
+	"github.com/svcforge/service-forge/transport/gateway/plugins"
 	"github.com/svcforge/service-forge/transport/grpcclient"
 	"google.golang.org/grpc"
 )
+
+func init() {
+	plugins.RegisterBuiltins(plugin.Default())
+}
 
 type HandlerFunc func(ctx context.Context, c *fiber.Ctx) (any, error)
 type RouteFunc func(app *fiber.App, gateway *Gateway)
@@ -42,9 +48,14 @@ func (g *Gateway) Init(ctx context.Context, runtime module.Runtime) error {
 		DisableStartupMessage: cfg.Gateway.DisableStartupMessage,
 	})
 	g.app.Use(requestid.New())
+	// Routes registered before the global plugin chain (health, plugin
+	// endpoints such as /metrics) are exempt from it.
 	g.app.Get("/health", func(c *fiber.Ctx) error {
 		return c.JSON(sferrors.Success(map[string]string{"status": "ok"}))
 	})
+	if err := g.mountGlobalPlugins(cfg); err != nil {
+		return err
+	}
 	if err := g.mountConfiguredRoutes(ctx, cfg, runtime); err != nil {
 		return err
 	}
@@ -93,10 +104,15 @@ func (g *Gateway) mountConfiguredRoutes(ctx context.Context, cfg *config.Config,
 			}
 		}
 		g.configuredRoutes = append(g.configuredRoutes, route)
+		routeHandlers, err := g.buildRoutePlugins(cfg, routeCfg)
+		if err != nil {
+			return err
+		}
 		method := strings.ToUpper(route.cfg.Method)
-		g.app.Add(method, route.cfg.Path, g.Handle(func(ctx context.Context, c *fiber.Ctx) (any, error) {
+		handlers := append(routeHandlers, g.Handle(func(ctx context.Context, c *fiber.Ctx) (any, error) {
 			return proxy.Invoke(ctx, c, route)
 		}))
+		g.app.Add(method, route.cfg.Path, handlers...)
 		if g.logger != nil {
 			g.logger.Info("mounted grpc proxy route", "method", method, "path", route.cfg.Path, "rpc", route.fullRPC)
 		}

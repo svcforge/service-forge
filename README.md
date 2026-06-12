@@ -304,6 +304,82 @@ runtime:
       provider: nats
 ```
 
+## Gateway Plugins
+
+The gateway has a plugin chain. All plugins, including built-ins, are off by
+default: only plugins listed under `gateway.plugins` run, in config order.
+
+```yaml
+gateway:
+  plugins:
+    - name: recovery
+    - name: access_log
+      config:
+        skip_paths: ["/health"]
+    - name: cors
+      config:
+        allow_origins: ["https://app.example.com"]
+    - name: rate_limit
+      config:
+        max: 100
+        window: 1m
+    - name: api_key
+      config:
+        keys: ["${API_KEY}"]
+    - name: jwt
+      config:
+        secret: "${JWT_SECRET}"
+        issuer: my-app
+    - name: metrics
+```
+
+Built-in plugins:
+
+- `recovery`: converts handler panics into the standard `INTERNAL` envelope.
+- `access_log`: one structured log line per request (`skip_paths` supported).
+- `cors`: cross-origin support (`allow_origins`, `allow_methods`,
+  `allow_headers`, `expose_headers`, `allow_credentials`, `max_age`).
+- `rate_limit`: per-client-IP in-memory sliding window (`max`, `window`).
+- `api_key`: key auth via header or query (`keys`, `header`, `query`).
+- `jwt`: bearer token validation with HS256/384/512 (`secret`, `algorithm`,
+  `issuer`, `audience`); verified claims land in `c.Locals("jwt_claims")`.
+- `metrics`: Prometheus request counter and latency histogram exposed on
+  `path` (default `/metrics`).
+
+Notes:
+
+- Set `enabled: false` to keep a plugin entry in config without running it.
+- `/health` and plugin-mounted endpoints such as `/metrics` bypass the global
+  chain.
+- Routes under `gateway.routes` accept a route-level `plugins` list that runs
+  after the global chain, only for that route.
+
+Projects register custom plugins before the gateway module starts, then
+select them in config like any built-in:
+
+```go
+import "github.com/svcforge/service-forge/transport/gateway/plugin"
+
+plugin.MustRegister("tenant-header", func(ctx plugin.BuildContext) (plugin.Plugin, error) {
+	tenant, err := ctx.Settings.String("tenant", "")
+	if err != nil {
+		return plugin.Plugin{}, err
+	}
+	return plugin.Plugin{Handler: func(c *fiber.Ctx) error {
+		c.Set("X-Tenant", tenant)
+		return c.Next()
+	}}, nil
+})
+```
+
+```yaml
+gateway:
+  plugins:
+    - name: tenant-header
+      config:
+        tenant: acme
+```
+
 ## Logging
 
 Default logs are intentionally quiet. Module lifecycle logs and the Fiber
@@ -354,8 +430,49 @@ Run standard Go benchmarks with allocation reporting:
 go test ./transport/gateway -run '^$' -bench . -benchmem
 ```
 
-The gateway benchmarks cover configured REST/JSON to gRPC proxy calls in both
-single-threaded and parallel hot-path scenarios.
+The gateway benchmarks cover configured REST/JSON to gRPC proxy calls in
+single-threaded and parallel hot-path scenarios, plus the plugin chain
+(`BenchmarkProxyPluginChainParallel`) with the chain off, the core production
+set, and JWT auth on top.
+
+### End-To-End Results
+
+Measured 2026-06-12 on Apple M5 Pro (18 cores), Go 1.26.2: wrk -> gateway ->
+gRPC backend over loopback, all on one machine, identical backend for every
+gateway. `wrk -t8 -c128 -d10s --latency`, mean of 3 runs, run-to-run variance
+under 4%. The grpc-gateway comparison handler mirrors protoc-gen-grpc-gateway
+generated code. Reproduce with the programs under `examples/bench/`.
+
+| Gateway | Requests/sec | p50 | p99 | Response size |
+|---|---|---|---|---|
+| Service Forge, no plugins | 97,016 | 1.19ms | 2.27ms | 254 B |
+| Service Forge, 5 plugins on | 89,545 (-7.7%) | 1.48ms | 3.40ms | 343 B |
+| grpc-gateway v2 | 81,779 | 1.50ms | 2.69ms | 174 B |
+
+Notes:
+
+- Service Forge proxies the same route 18.6% faster than grpc-gateway while
+  returning a larger response (the standard envelope adds ~80 bytes).
+- "5 plugins on" is recovery, access_log, rate_limit, api_key and metrics —
+  with access_log writing a real structured log line per request (2.7M lines
+  over the run) and rate_limit attaching X-RateLimit-* response headers. The
+  full chain costs 7.7% throughput and still outruns plain grpc-gateway.
+- Numbers are REST/JSON to gRPC transcoding, Service Forge's target workload.
+  They are not comparable to plain HTTP reverse-proxy benchmarks
+  (Nginx/Envoy), and cross-hardware comparisons with published Kong/APISIX
+  figures are indicative only.
+
+Reproduce:
+
+```bash
+go run ./examples/bench/backend &
+go run ./examples/bench/svcforgegw &
+go run ./examples/bench/svcforgegw -port 8082 -plugins core &
+go run ./examples/bench/grpcgatewaygw &
+wrk -t8 -c128 -d10s --latency http://127.0.0.1:8080/api/health
+wrk -t8 -c128 -d10s --latency http://127.0.0.1:8081/api/health
+wrk -t8 -c128 -d10s --latency -H "X-API-Key: bench-key" http://127.0.0.1:8082/api/health
+```
 
 ## Package Map
 

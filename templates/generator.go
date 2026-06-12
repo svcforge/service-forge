@@ -175,6 +175,16 @@ gateway:
   listen_ip: 0.0.0.0
   port: 8080
   disable_startup_message: true
+  # Built-in plugins are off until listed here. They run in config order.
+  # Available: recovery, access_log, cors, rate_limit, api_key, jwt, metrics.
+  # plugins:
+  #   - name: recovery
+  #   - name: access_log
+  #   - name: rate_limit
+  #     config:
+  #       max: 100
+  #       window: 1m
+  #   - name: metrics
   routes:
     # Configure REST/JSON to gRPC proxy routes here.
     # For local multi-process development with memory registry, use target.
