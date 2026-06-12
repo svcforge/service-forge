@@ -49,6 +49,8 @@ go mod tidy
 The generated `go.mod` will include a local replace automatically:
 
 ```go
+require github.com/svcforge/service-forge v0.0.0
+
 replace github.com/svcforge/service-forge => ..
 ```
 
@@ -59,8 +61,12 @@ the local framework path explicitly:
 svcforge new demo --replace /path/to/service-forge
 ```
 
-After Service Forge is published and tagged, remove the local `replace` line and
-use a real version:
+When creating a project without a local `replace`, the generated `go.mod` omits
+the framework requirement. `go mod tidy` resolves
+`github.com/svcforge/service-forge` at the latest available version from the
+imports generated in the project.
+
+To upgrade an existing generated project later:
 
 ```bash
 go get github.com/svcforge/service-forge@latest

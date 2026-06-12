@@ -124,9 +124,9 @@ func detectLocalReplace(root, projectDir string) string {
 const projectGoMod = `module {{ .Name }}
 
 go 1.23
-
-require github.com/svcforge/service-forge v0.0.0
 {{ if .Replace }}
+require github.com/svcforge/service-forge v0.0.0
+
 replace github.com/svcforge/service-forge => {{ .Replace }}
 {{ end }}
 `
