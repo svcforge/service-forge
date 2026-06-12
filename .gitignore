@@ -1,0 +1,14 @@
+.DS_Store
+
+# Local generated projects
+/demo/
+/demo*/
+
+# Build outputs
+/bin/
+/dist/
+*.test
+coverage.out
+
+# Local config
+config/local.yaml

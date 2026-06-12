@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package example.v1;
+
+option go_package = "github.com/svcforge/service-forge/api/gen/go/example/v1;examplev1";
+
+service ExampleService {
+  rpc Ping(PingRequest) returns (PingResponse);
+}
+
+message PingRequest {
+  string message = 1;
+}
+
+message PingResponse {
+  string message = 1;
+}
