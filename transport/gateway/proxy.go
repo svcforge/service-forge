@@ -23,11 +23,12 @@ type proxyRoute struct {
 	cfg        config.GatewayRouteConfig
 	fullRPC    string
 	rpcService string
-	invoker    ProxyInvoker
-	retry      *retryPolicy
-	breaker    *circuitBreaker
-	balancer   balancer
-	conns      []*grpc.ClientConn
+	invoker     ProxyInvoker
+	streamCodec *streamCodec
+	retry       *retryPolicy
+	breaker     *circuitBreaker
+	balancer    balancer
+	conns       []*grpc.ClientConn
 }
 
 type grpcProxy struct {
@@ -170,7 +171,11 @@ func newProxyRoute(cfg config.GatewayRouteConfig) (*proxyRoute, error) {
 		return nil, fmt.Errorf("gateway route %s must set service or target", routeLabel(cfg))
 	}
 	if strings.TrimSpace(cfg.Method) == "" {
-		cfg.Method = fiber.MethodPost
+		if strings.TrimSpace(cfg.Stream) != "" {
+			cfg.Method = fiber.MethodGet
+		} else {
+			cfg.Method = fiber.MethodPost
+		}
 	}
 	return &proxyRoute{
 		cfg:        cfg,
