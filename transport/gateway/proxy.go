@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -25,8 +24,10 @@ type proxyRoute struct {
 	fullRPC    string
 	rpcService string
 	invoker    ProxyInvoker
+	retry      *retryPolicy
+	breaker    *circuitBreaker
+	balancer   balancer
 	conns      []*grpc.ClientConn
-	nextConn   atomic.Uint64
 }
 
 type grpcProxy struct {
@@ -175,17 +176,69 @@ func newProxyRoute(cfg config.GatewayRouteConfig) (*proxyRoute, error) {
 		cfg:        cfg,
 		fullRPC:    fullRPC,
 		rpcService: service,
+		retry:      buildRetryPolicy(cfg.Retry),
+		breaker:    newCircuitBreaker(cfg.CircuitBreaker),
+		balancer:   buildBalancer(cfg.LoadBalance),
 	}, nil
 }
 
 func (p *grpcProxy) Invoke(ctx context.Context, c *fiber.Ctx, route *proxyRoute) (any, error) {
-	if route.cfg.Timeout > 0 {
+	if route.breaker == nil {
+		return p.invokeWithRetry(ctx, c, route)
+	}
+
+	gen, allowed := route.breaker.beforeRequest()
+	if !allowed {
+		return nil, sferrors.New(sferrors.CodeUnavailable, "circuit breaker open").
+			WithDetails("rpc", route.fullRPC)
+	}
+	result, err := p.invokeWithRetry(ctx, c, route)
+	route.breaker.afterRequest(gen, !isBreakerFailure(err))
+	return result, err
+}
+
+// invokeWithRetry runs a single proxy call, applying the route's retry policy
+// when configured. The circuit breaker (if any) wraps this in Invoke, so a
+// fully retried-then-failed call counts as one breaker failure.
+func (p *grpcProxy) invokeWithRetry(ctx context.Context, c *fiber.Ctx, route *proxyRoute) (any, error) {
+	if route.retry == nil {
+		return p.invokeOnce(ctx, c, route)
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < route.retry.maxAttempts; attempt++ {
+		if attempt > 0 && route.retry.backoff > 0 {
+			select {
+			case <-time.After(route.retry.backoff):
+			case <-ctx.Done():
+				return nil, sferrors.New(sferrors.CodeDeadlineExceeded, "gateway retry aborted").WithCause(ctx.Err())
+			}
+		}
+		result, err := p.invokeOnce(ctx, c, route)
+		if err == nil {
+			return result, nil
+		}
+		lastErr = err
+		if !route.retry.retryable(err) {
+			return nil, err
+		}
+	}
+	return nil, lastErr
+}
+
+// invokeOnce performs a single proxy attempt: it applies the per-attempt
+// timeout, selects (or dials) a connection, and runs the registered invoker.
+// Each attempt picks a fresh connection from the pool so a retry naturally
+// routes around a bad endpoint.
+func (p *grpcProxy) invokeOnce(ctx context.Context, c *fiber.Ctx, route *proxyRoute) (any, error) {
+	if timeout := route.attemptTimeout(); timeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, route.cfg.Timeout)
+		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
 
-	conn := route.pickConn()
+	conn, release := route.pickConn()
+	defer release()
 	if conn == nil {
 		var err error
 		conn, err = p.dial(ctx, route.cfg)
@@ -196,15 +249,27 @@ func (p *grpcProxy) Invoke(ctx context.Context, c *fiber.Ctx, route *proxyRoute)
 	return route.invoker(ctx, c, conn)
 }
 
-func (r *proxyRoute) pickConn() *grpc.ClientConn {
-	switch len(r.conns) {
+// attemptTimeout returns the deadline applied to a single attempt: the retry
+// per-try timeout when set, otherwise the route timeout.
+func (r *proxyRoute) attemptTimeout() time.Duration {
+	if r.retry != nil && r.retry.perTryTimeout > 0 {
+		return r.retry.perTryTimeout
+	}
+	return r.cfg.Timeout
+}
+
+// pickConn selects a pooled connection via the route balancer and returns a
+// release callback (always non-nil) to be invoked when the attempt completes.
+// A nil connection means there is no pool and the caller should dial on demand.
+func (r *proxyRoute) pickConn() (*grpc.ClientConn, func()) {
+	switch n := len(r.conns); n {
 	case 0:
-		return nil
+		return nil, noopRelease
 	case 1:
-		return r.conns[0]
+		return r.conns[0], noopRelease
 	default:
-		idx := r.nextConn.Add(1)
-		return r.conns[int(idx%uint64(len(r.conns)))]
+		idx, release := r.balancer.pick(n)
+		return r.conns[idx], release
 	}
 }
 

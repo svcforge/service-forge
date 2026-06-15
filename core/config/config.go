@@ -45,9 +45,55 @@ type GatewayRouteConfig struct {
 	Service  string                `yaml:"service" json:"service"`
 	Target   string                `yaml:"target" json:"target"`
 	RPC      string                `yaml:"rpc" json:"rpc"`
-	Timeout  time.Duration         `yaml:"timeout" json:"timeout"`
-	PoolSize int                   `yaml:"pool_size" json:"pool_size"`
-	Plugins  []GatewayPluginConfig `yaml:"plugins" json:"plugins"`
+	Timeout        time.Duration         `yaml:"timeout" json:"timeout"`
+	PoolSize       int                   `yaml:"pool_size" json:"pool_size"`
+	LoadBalance    string                `yaml:"load_balance" json:"load_balance"`
+	Retry          *RetryConfig          `yaml:"retry" json:"retry"`
+	CircuitBreaker *CircuitBreakerConfig `yaml:"circuit_breaker" json:"circuit_breaker"`
+	Plugins        []GatewayPluginConfig `yaml:"plugins" json:"plugins"`
+}
+
+// CircuitBreakerConfig controls the per-route circuit breaker. The breaker is
+// off by default and only engages when this block is present. It trips when the
+// failure ratio over a rolling window exceeds FailureRatio (after at least
+// MinRequests calls), short-circuiting further calls with UNAVAILABLE until a
+// probe succeeds. Only server-side/transport failures count toward tripping;
+// client errors such as INVALID_ARGUMENT never trip the breaker.
+type CircuitBreakerConfig struct {
+	// MinRequests is the minimum number of calls observed in the window before
+	// the breaker may trip. Defaults to 20.
+	MinRequests int `yaml:"min_requests" json:"min_requests"`
+	// FailureRatio in (0,1] is the failure fraction that trips the breaker once
+	// MinRequests is reached. Defaults to 0.5.
+	FailureRatio float64 `yaml:"failure_ratio" json:"failure_ratio"`
+	// Window is the rolling interval over which calls are counted while closed.
+	// Counts reset at the end of each window. Defaults to 10s.
+	Window time.Duration `yaml:"window" json:"window"`
+	// OpenTimeout is how long the breaker stays open before allowing a single
+	// trial (half-open) call. Defaults to 5s.
+	OpenTimeout time.Duration `yaml:"open_timeout" json:"open_timeout"`
+	// HalfOpenMaxCalls is the number of concurrent trial calls permitted while
+	// half-open. Defaults to 1.
+	HalfOpenMaxCalls int `yaml:"half_open_max_calls" json:"half_open_max_calls"`
+}
+
+// RetryConfig controls automatic retries for a proxy route. Retries are off by
+// default: a route only retries when this block is present and MaxAttempts > 1.
+// Only failures whose framework code appears in RetryOn are retried, so callers
+// stay in control of which RPCs are safe to repeat.
+type RetryConfig struct {
+	// MaxAttempts is the total number of tries including the first one. Values
+	// <= 1 disable retries.
+	MaxAttempts int `yaml:"max_attempts" json:"max_attempts"`
+	// PerTryTimeout bounds each individual attempt. When 0 the route Timeout is
+	// used for every attempt.
+	PerTryTimeout time.Duration `yaml:"per_try_timeout" json:"per_try_timeout"`
+	// Backoff is the fixed delay inserted before each retry. When 0 retries fire
+	// immediately.
+	Backoff time.Duration `yaml:"backoff" json:"backoff"`
+	// RetryOn lists framework error codes (e.g. "UNAVAILABLE") that are safe to
+	// retry. When empty it defaults to UNAVAILABLE and DEADLINE_EXCEEDED.
+	RetryOn []string `yaml:"retry_on" json:"retry_on"`
 }
 
 // GatewayPluginConfig selects a gateway plugin by name. Plugins are off by
