@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/requestid"
 	"github.com/svcforge/service-forge/core/config"
@@ -83,12 +84,29 @@ func (g *Gateway) mountConfiguredRoutes(ctx context.Context, cfg *config.Config,
 		if err != nil {
 			return err
 		}
-		invoker, ok := lookupProxyInvoker(route.fullRPC)
-		if !ok {
-			return sferrors.New(sferrors.CodeFailedPrecondition, "grpc proxy invoker is not registered").
-				WithDetails("rpc", route.fullRPC)
+		isStream := strings.TrimSpace(routeCfg.Stream) != ""
+		if isStream {
+			codec, ok := lookupStreamProxy(route.fullRPC)
+			if !ok {
+				return sferrors.New(sferrors.CodeFailedPrecondition, "grpc stream proxy is not registered").
+					WithDetails("rpc", route.fullRPC)
+			}
+			kind := strings.ToLower(strings.TrimSpace(routeCfg.Stream))
+			if kind != codec.kind {
+				return sferrors.New(sferrors.CodeFailedPrecondition, "gateway stream kind mismatch").
+					WithDetails("rpc", route.fullRPC).
+					WithDetails("configured", kind).
+					WithDetails("registered", codec.kind)
+			}
+			route.streamCodec = codec
+		} else {
+			invoker, ok := lookupProxyInvoker(route.fullRPC)
+			if !ok {
+				return sferrors.New(sferrors.CodeFailedPrecondition, "grpc proxy invoker is not registered").
+					WithDetails("rpc", route.fullRPC)
+			}
+			route.invoker = invoker
 		}
-		route.invoker = invoker
 		if strings.TrimSpace(route.cfg.Target) != "" {
 			poolSize := route.cfg.PoolSize
 			if poolSize <= 0 {
@@ -108,6 +126,18 @@ func (g *Gateway) mountConfiguredRoutes(ctx context.Context, cfg *config.Config,
 		if err != nil {
 			return err
 		}
+		if isStream {
+			switch route.streamCodec.kind {
+			case streamKindSSE:
+				g.mountSSERoute(route, routeHandlers, proxy)
+			default:
+				g.mountStreamRoute(route, routeHandlers, proxy)
+			}
+			if g.logger != nil {
+				g.logger.Info("mounted grpc stream proxy route", "kind", route.streamCodec.kind, "path", route.cfg.Path, "rpc", route.fullRPC)
+			}
+			continue
+		}
 		method := strings.ToUpper(route.cfg.Method)
 		handlers := append(routeHandlers, g.Handle(func(ctx context.Context, c *fiber.Ctx) (any, error) {
 			return proxy.Invoke(ctx, c, route)
@@ -118,6 +148,42 @@ func (g *Gateway) mountConfiguredRoutes(ctx context.Context, cfg *config.Config,
 		}
 	}
 	return nil
+}
+
+// mountStreamRoute wires a WebSocket endpoint that bridges to a gRPC stream. An
+// upgrade guard runs first so non-WebSocket requests get 426; route-level
+// plugins (auth, etc.) then run during the HTTP handshake before the connection
+// is upgraded and handed to the stream proxy.
+func (g *Gateway) mountStreamRoute(route *proxyRoute, routeHandlers []fiber.Handler, proxy *grpcProxy) {
+	guard := func(c *fiber.Ctx) error {
+		if websocket.IsWebSocketUpgrade(c) {
+			return c.Next()
+		}
+		return fiber.ErrUpgradeRequired
+	}
+	wsHandler := websocket.New(func(ws *websocket.Conn) {
+		if err := proxy.InvokeStream(context.Background(), ws, route); err != nil && g.logger != nil {
+			g.logger.Warn("grpc stream proxy ended with error", "path", route.cfg.Path, "rpc", route.fullRPC, "error", err)
+		}
+	})
+	handlers := make([]fiber.Handler, 0, len(routeHandlers)+2)
+	handlers = append(handlers, guard)
+	handlers = append(handlers, routeHandlers...)
+	handlers = append(handlers, wsHandler)
+	g.app.Get(route.cfg.Path, handlers...)
+}
+
+// mountSSERoute wires a plain HTTP endpoint that bridges a single request to a
+// server-streaming gRPC call, delivered as Server-Sent Events. Route-level
+// plugins run before the stream starts.
+func (g *Gateway) mountSSERoute(route *proxyRoute, routeHandlers []fiber.Handler, proxy *grpcProxy) {
+	handler := func(c *fiber.Ctx) error {
+		return proxy.InvokeServerStream(c, route)
+	}
+	handlers := make([]fiber.Handler, 0, len(routeHandlers)+1)
+	handlers = append(handlers, routeHandlers...)
+	handlers = append(handlers, handler)
+	g.app.Add(strings.ToUpper(route.cfg.Method), route.cfg.Path, handlers...)
 }
 
 func (g *Gateway) Start(ctx context.Context) error {

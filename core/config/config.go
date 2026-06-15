@@ -48,6 +48,7 @@ type GatewayRouteConfig struct {
 	Timeout        time.Duration         `yaml:"timeout" json:"timeout"`
 	PoolSize       int                   `yaml:"pool_size" json:"pool_size"`
 	LoadBalance    string                `yaml:"load_balance" json:"load_balance"`
+	Stream         string                `yaml:"stream" json:"stream"`
 	Retry          *RetryConfig          `yaml:"retry" json:"retry"`
 	CircuitBreaker *CircuitBreakerConfig `yaml:"circuit_breaker" json:"circuit_breaker"`
 	Plugins        []GatewayPluginConfig `yaml:"plugins" json:"plugins"`

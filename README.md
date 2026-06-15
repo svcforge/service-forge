@@ -25,7 +25,9 @@ The default architecture is:
 Client -> REST/JSON Gateway -> gRPC Services -> Ports -> Adapters
 ```
 
-- Gateway exposes REST/JSON.
+- Gateway exposes REST/JSON, and can proxy unary, bidirectional-stream
+  (WebSocket), and server-stream (SSE) gRPC routes with optional per-route
+  retry, circuit breaking, and load balancing.
 - Business services expose gRPC only.
 - Business code depends on `ports/*` interfaces.
 - Redis, SQL, MQ, registry, tracing, and storage are replaceable adapters.
@@ -311,6 +313,74 @@ gateway:
 connection with the fewest in-flight calls, which is preferable when request
 latencies are uneven. `random` picks uniformly. Unknown or empty values fall
 back to `round_robin`.
+
+## WebSocket To gRPC Streaming
+
+A route can bridge a WebSocket connection to a bidirectional gRPC stream. Set
+`stream: bidi` and register a stream proxy that supplies the per-frame message
+types:
+
+```yaml
+gateway:
+  routes:
+    - name: chat
+      path: /ws/chat
+      target: 127.0.0.1:9000
+      rpc: /example.v1.Chat/Stream
+      stream: bidi
+```
+
+```go
+gateway.MustRegisterBidiStreamProxy("/example.v1.Chat/Stream",
+	func() proto.Message { return &chatv1.ServerMessage{} }, // server -> client frames
+	func() proto.Message { return &chatv1.ClientMessage{} }, // client -> server frames
+)
+```
+
+The route is exposed as a WebSocket endpoint via HTTP upgrade; non-upgrade
+requests receive `426 Upgrade Required`. Each WebSocket text frame is decoded
+from JSON into the client message and sent on the gRPC stream; each gRPC message
+is encoded to JSON and written back as a text frame. Two goroutines pump the
+directions independently and unblock each other on close.
+
+- Retries and per-call timeouts do not apply to streams. A configured circuit
+  breaker only guards stream establishment, not frames in flight.
+- One pooled connection is selected per stream and held for its lifetime.
+- Route-level plugins (auth, etc.) run during the HTTP handshake before upgrade.
+- Closing the WebSocket half-closes the gRPC stream; a server-side end of stream
+  (`io.EOF`) closes the WebSocket.
+
+## Server Streaming As SSE
+
+For one-way server streaming, set `stream: sse`. The route takes a single
+request (bound from body/query/path like a unary route) and relays each gRPC
+response message to the client as a Server-Sent Event:
+
+```yaml
+gateway:
+  routes:
+    - name: feed
+      path: /sse/feed
+      target: 127.0.0.1:9000
+      rpc: /example.v1.Feed/Stream
+      stream: sse
+```
+
+```go
+gateway.MustRegisterServerStreamProxy("/example.v1.Feed/Stream",
+	func() proto.Message { return &feedv1.FeedRequest{} }, // single request
+	func() proto.Message { return &feedv1.FeedEvent{} },   // each streamed event
+)
+```
+
+The response uses `Content-Type: text/event-stream`; each gRPC message is written
+as one `data: <json>` event. Streaming routes default to HTTP `GET` (so browser
+`EventSource` works) unless `method` is set. The gRPC stream ending (`io.EOF`)
+closes the response; a client disconnect is detected on the next frame's flush.
+
+The same constraints as the WebSocket case apply: retries and per-call timeouts
+do not apply, a configured breaker only guards stream establishment, and
+route-level plugins run before the stream starts.
 
 ## Generate Protobuf Code
 
