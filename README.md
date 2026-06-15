@@ -1,5 +1,21 @@
 # Service Forge
 
+Service Forge 是一个面向 Go 微服务项目的脚手架与运行时框架，目标是把
+REST/JSON 网关、gRPC 服务、配置化运行组件和可替换基础设施适配器整合成
+一套清晰、可扩展、适合业务落地的工程结构。
+
+它默认采用 `Client -> REST/JSON Gateway -> gRPC Services -> Ports -> Adapters`
+的分层模型：对外由网关提供 HTTP API，对内业务服务保持 gRPC 边界，业务逻辑
+只依赖稳定的 `ports/*` 接口，Redis、PostgreSQL、RabbitMQ、Consul、
+OpenTelemetry 等基础设施通过 adapter 按配置装配。框架内置 CLI，可快速创建
+项目、添加服务、生成 protobuf 代码，并支持通过配置声明 API 到 gRPC 的静态
+转发路由。
+
+Service Forge 适合用于从零搭建标准化 Go 微服务项目，也适合在团队内部沉淀
+统一的服务模板、网关规范、组件选型和工程约束。它强调生成代码与显式配置：
+网关转发走静态 protobuf Go 代码，不依赖运行时反射或动态描述符，从而在保持
+开发体验的同时兼顾性能与可维护性。
+
 Service Forge is a Go microservice framework and scaffolding tool built around
 **Core + Ports + Adapters + Runtime Modules**.
 
@@ -217,6 +233,84 @@ contention point for your workload.
 For local multi-process development, `registry: memory` is process-local. Use
 `target` directly or switch to a shared registry provider before relying on
 `service` discovery across processes.
+
+## Route Resilience
+
+Configured proxy routes support optional retry, circuit breaking, and load
+balancing. All three are off by default and add no overhead unless enabled per
+route. Failures are classified by framework error code, so client errors such as
+`INVALID_ARGUMENT` are never retried and never count against the breaker.
+
+### Retry
+
+Retries a failed attempt on a freshly selected pooled connection, routing around
+a bad endpoint:
+
+```yaml
+gateway:
+  routes:
+    - name: example-ping
+      path: /api/v1/ping
+      target: 127.0.0.1:9000
+      rpc: /example.v1.ExampleService/Ping
+      retry:
+        max_attempts: 3      # total tries including the first; <= 1 disables
+        per_try_timeout: 1s  # per-attempt deadline; falls back to route timeout
+        backoff: 50ms        # fixed delay before each retry; 0 fires immediately
+        retry_on:            # framework codes safe to retry
+          - UNAVAILABLE
+          - DEADLINE_EXCEEDED
+```
+
+`retry_on` defaults to `UNAVAILABLE` and `DEADLINE_EXCEEDED` when omitted. Only
+enable retries for idempotent RPCs: a transient `UNAVAILABLE` may still have been
+applied by the backend.
+
+### Circuit Breaker
+
+Trips when the failure ratio over a rolling window exceeds the threshold,
+short-circuiting further calls with `UNAVAILABLE` until a probe succeeds. The
+breaker wraps retries, so one fully-retried-then-failed call counts as a single
+breaker failure:
+
+```yaml
+gateway:
+  routes:
+    - name: example-ping
+      path: /api/v1/ping
+      target: 127.0.0.1:9000
+      rpc: /example.v1.ExampleService/Ping
+      circuit_breaker:
+        min_requests: 20        # minimum calls in the window before it can trip
+        failure_ratio: 0.5      # failure fraction (0,1] that trips the breaker
+        window: 10s             # rolling window for counting calls while closed
+        open_timeout: 5s        # time open before allowing a half-open probe
+        half_open_max_calls: 1  # concurrent probes allowed while half-open
+```
+
+Only server-side and transport failures (`UNAVAILABLE`, `DEADLINE_EXCEEDED`,
+`INTERNAL`) count toward tripping; client errors never open the breaker.
+
+### Load Balancing
+
+When `pool_size` is greater than 1, `load_balance` selects how requests are
+spread across the pooled connections:
+
+```yaml
+gateway:
+  routes:
+    - name: example-ping
+      path: /api/v1/ping
+      target: 127.0.0.1:9000
+      rpc: /example.v1.ExampleService/Ping
+      pool_size: 4
+      load_balance: least_conn  # round_robin (default) | least_conn | random
+```
+
+`round_robin` cycles through connections in order. `least_conn` routes to the
+connection with the fewest in-flight calls, which is preferable when request
+latencies are uneven. `random` picks uniformly. Unknown or empty values fall
+back to `round_robin`.
 
 ## Generate Protobuf Code
 
