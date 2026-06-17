@@ -141,6 +141,78 @@ func TestRouteLevelPluginOnConfiguredRoute(t *testing.T) {
 	}
 }
 
+func TestRouteSkipsNamedGlobalPlugin(t *testing.T) {
+	registerHealthProxyInvoker(t)
+	server, target := startHealthServer(t)
+	defer server.Stop()
+
+	route := healthRoute(target)
+	route.SkipGlobalPlugins = []string{"api_key"}
+	cfg := config.Default()
+	cfg.Gateway.Plugins = []config.GatewayPluginConfig{
+		{Name: "api_key", Config: map[string]any{"keys": []any{"k-1"}}},
+	}
+	cfg.Gateway.Routes = []config.GatewayRouteConfig{route}
+	gw := initGateway(t, cfg, pingRoute())
+
+	// The configured route opted out of global auth: reachable without a key.
+	resp, _ := gw.app.Test(httptest.NewRequest("GET", "/api/health", nil))
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("skip route without key: expected 200, got %d", resp.StatusCode)
+	}
+
+	// Other routes still enforce the global plugin.
+	resp, _ = gw.app.Test(httptest.NewRequest("GET", "/api/v1/ping", nil))
+	if resp.StatusCode != fiber.StatusUnauthorized {
+		t.Fatalf("unrelated route must still enforce auth: expected 401, got %d", resp.StatusCode)
+	}
+}
+
+func TestRouteSkipsAllGlobalPlugins(t *testing.T) {
+	registerHealthProxyInvoker(t)
+	server, target := startHealthServer(t)
+	defer server.Stop()
+
+	route := healthRoute(target)
+	route.SkipGlobalPlugins = []string{"*"}
+	cfg := config.Default()
+	cfg.Gateway.Plugins = []config.GatewayPluginConfig{
+		{Name: "api_key", Config: map[string]any{"keys": []any{"k-1"}}},
+	}
+	cfg.Gateway.Routes = []config.GatewayRouteConfig{route}
+	gw := initGateway(t, cfg)
+
+	resp, _ := gw.app.Test(httptest.NewRequest("GET", "/api/health", nil))
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("skip-all route without key: expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestRouteSkipIsMethodScoped(t *testing.T) {
+	cfg := config.Default()
+	cfg.Gateway.Plugins = []config.GatewayPluginConfig{
+		{Name: "api_key", Config: map[string]any{"keys": []any{"k-1"}}},
+	}
+	// A GET route at /api/v1/ping skips auth, but pingRoute is also GET there,
+	// so use a distinct path to prove the skip does not leak to other methods.
+	cfg.Gateway.Routes = []config.GatewayRouteConfig{{
+		Name:              "skip-post",
+		Method:            "POST",
+		Path:              "/api/v1/ping",
+		Target:            "passthrough:///unused",
+		RPC:               "/grpc.health.v1.Health/Check",
+		SkipGlobalPlugins: []string{"api_key"},
+	}}
+	registerHealthProxyInvoker(t)
+	gw := initGateway(t, cfg, pingRoute())
+
+	// GET keeps enforcing auth even though a POST skip exists on the same path.
+	resp, _ := gw.app.Test(httptest.NewRequest("GET", "/api/v1/ping", nil))
+	if resp.StatusCode != fiber.StatusUnauthorized {
+		t.Fatalf("GET must still enforce auth: expected 401, got %d", resp.StatusCode)
+	}
+}
+
 func TestCustomProjectPlugin(t *testing.T) {
 	plugin.MustRegister("test-header", func(ctx plugin.BuildContext) (plugin.Plugin, error) {
 		value, err := ctx.Settings.String("value", "")

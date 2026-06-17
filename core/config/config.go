@@ -51,7 +51,36 @@ type GatewayRouteConfig struct {
 	Stream         string                `yaml:"stream" json:"stream"`
 	Retry          *RetryConfig          `yaml:"retry" json:"retry"`
 	CircuitBreaker *CircuitBreakerConfig `yaml:"circuit_breaker" json:"circuit_breaker"`
-	Plugins        []GatewayPluginConfig `yaml:"plugins" json:"plugins"`
+	ForwardClaims  []ClaimForwardConfig  `yaml:"forward_claims" json:"forward_claims"`
+	// SkipGlobalPlugins lists gateway.plugins (by name) that this route opts out
+	// of, so a public endpoint can bypass global auth or rate limiting while the
+	// rest of the gateway stays protected. A single "*" entry skips every global
+	// plugin. Route-level plugins are unaffected (just omit the ones you don't
+	// want). Empty by default: the route runs the full global chain.
+	SkipGlobalPlugins []string              `yaml:"skip_global_plugins" json:"skip_global_plugins"`
+	Plugins           []GatewayPluginConfig `yaml:"plugins" json:"plugins"`
+}
+
+// ClaimForwardConfig maps one verified JWT claim to an outgoing gRPC metadata
+// header so the upstream service receives the caller's identity. Forwarding is
+// off by default: a route only forwards the claims it lists here. Values are
+// read from the request locals populated by the jwt plugin, so that plugin must
+// run on the route (or globally) for the claims to be present.
+type ClaimForwardConfig struct {
+	// Claim is the JWT claim key to read (for example "sub" or "role").
+	Claim string `yaml:"claim" json:"claim"`
+	// Header is the outgoing gRPC metadata key. gRPC lowercases metadata keys,
+	// so this is lowercased too. Defaults to Claim when empty.
+	Header string `yaml:"header" json:"header"`
+	// Required rejects the request with UNAUTHENTICATED when the claim is absent
+	// (or not a scalar) and no Default is set. Off by default, so a missing
+	// optional claim is silently skipped.
+	Required bool `yaml:"required" json:"required"`
+	// Default is the value forwarded when the claim is absent. A pointer so an
+	// empty string can be distinguished from "no default". When set it takes
+	// precedence over Required, so the request is never rejected for this claim.
+	// Doubles as a way to inject a static header unrelated to any token claim.
+	Default *string `yaml:"default" json:"default"`
 }
 
 // CircuitBreakerConfig controls the per-route circuit breaker. The breaker is
