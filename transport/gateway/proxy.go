@@ -322,7 +322,7 @@ func bindProtoRequest(c *fiber.Ctx, msg proto.Message) error {
 	if err != nil {
 		return err
 	}
-	if err := (protojson.UnmarshalOptions{DiscardUnknown: false}).Unmarshal(data, msg); err != nil {
+	if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(data, msg); err != nil {
 		return sferrors.New(sferrors.CodeInvalidArgument, "request does not match grpc input").WithCause(err)
 	}
 	return nil
