@@ -116,6 +116,10 @@ func (p *grpcProxy) InvokeStream(ctx context.Context, ws *websocket.Conn, route 
 		}
 	}
 
+	ctx, err := route.claims.outgoing(ctx, wsLocals(ws))
+	if err != nil {
+		return err
+	}
 	desc := &grpc.StreamDesc{ServerStreams: true, ClientStreams: true}
 	stream, err := conn.NewStream(ctx, desc, route.fullRPC)
 	if err != nil {
@@ -148,6 +152,12 @@ func (p *grpcProxy) InvokeServerStream(c *fiber.Ctx, route *proxyRoute) error {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	ctx, err := route.claims.outgoing(ctx, fiberLocals(c))
+	if err != nil {
+		cancel()
+		release()
+		return writeProxyError(c, err)
+	}
 	stream, err := conn.NewStream(ctx, &grpc.StreamDesc{ServerStreams: true}, route.fullRPC)
 	if err != nil {
 		cancel()
@@ -183,6 +193,14 @@ func (p *grpcProxy) InvokeServerStream(c *fiber.Ctx, route *proxyRoute) error {
 		}
 	})
 	return nil
+}
+
+// wsLocals adapts an upgraded WebSocket connection to the locals lookup the
+// claim forwarder expects. contrib/websocket copies the request locals (set by
+// route plugins during the HTTP handshake) into the connection, so claims from
+// the jwt plugin are available here.
+func wsLocals(ws *websocket.Conn) func(string) any {
+	return func(key string) any { return ws.Locals(key) }
 }
 
 func setSSEHeaders(c *fiber.Ctx) {

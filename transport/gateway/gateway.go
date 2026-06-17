@@ -31,6 +31,7 @@ type Gateway struct {
 	logger           module.Logger
 	routes           []RouteFunc
 	configuredRoutes []*proxyRoute
+	globalSkips      []routePluginSkip
 	address          string
 }
 
@@ -84,6 +85,7 @@ func (g *Gateway) mountConfiguredRoutes(ctx context.Context, cfg *config.Config,
 		if err != nil {
 			return err
 		}
+		g.registerPluginSkip(route.cfg)
 		isStream := strings.TrimSpace(routeCfg.Stream) != ""
 		if isStream {
 			codec, ok := lookupStreamProxy(route.fullRPC)

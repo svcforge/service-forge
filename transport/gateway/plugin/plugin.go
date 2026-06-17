@@ -24,6 +24,10 @@ import (
 
 // Plugin is the built artifact a Factory produces for one config entry.
 type Plugin struct {
+	// Name is the registered plugin name, populated by Build from the config
+	// entry. Lets the caller correlate a built handler back to its config (for
+	// example to honour a route's skip list).
+	Name string
 	// Handler is mounted on the request chain. May be nil for plugins that
 	// only mount routes (for example a metrics endpoint).
 	Handler fiber.Handler
@@ -115,6 +119,7 @@ func (r *Registry) Build(specs []config.GatewayPluginConfig, base BuildContext) 
 		if err != nil {
 			return nil, fmt.Errorf("gateway plugin %q: %w", spec.Name, err)
 		}
+		built.Name = strings.ToLower(strings.TrimSpace(spec.Name))
 		plugins = append(plugins, built)
 	}
 	return plugins, nil

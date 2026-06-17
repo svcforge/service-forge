@@ -28,6 +28,7 @@ type proxyRoute struct {
 	retry       *retryPolicy
 	breaker     *circuitBreaker
 	balancer    balancer
+	claims      *claimForwarder
 	conns       []*grpc.ClientConn
 }
 
@@ -184,6 +185,7 @@ func newProxyRoute(cfg config.GatewayRouteConfig) (*proxyRoute, error) {
 		retry:      buildRetryPolicy(cfg.Retry),
 		breaker:    newCircuitBreaker(cfg.CircuitBreaker),
 		balancer:   buildBalancer(cfg.LoadBalance),
+		claims:     buildClaimForwarder(cfg.ForwardClaims),
 	}, nil
 }
 
@@ -251,7 +253,17 @@ func (p *grpcProxy) invokeOnce(ctx context.Context, c *fiber.Ctx, route *proxyRo
 			return nil, sferrors.New(sferrors.CodeUnavailable, "grpc target unavailable").WithCause(err)
 		}
 	}
+	ctx, err := route.claims.outgoing(ctx, fiberLocals(c))
+	if err != nil {
+		return nil, err
+	}
 	return route.invoker(ctx, c, conn)
+}
+
+// fiberLocals adapts a fiber request context to the locals lookup the claim
+// forwarder expects.
+func fiberLocals(c *fiber.Ctx) func(string) any {
+	return func(key string) any { return c.Locals(key) }
 }
 
 // attemptTimeout returns the deadline applied to a single attempt: the retry
