@@ -38,9 +38,9 @@ type streamCodec struct {
 var streamProxies sync.Map // fullRPC -> *streamCodec
 
 // RegisterBidiStreamProxy registers a bidirectional WebSocket<->gRPC stream
-// bridge for an RPC. Each WebSocket text frame is decoded (protojson) into a
-// newSend message and forwarded to the gRPC stream; each gRPC message is encoded
-// into a newRecv message and written back as a WebSocket text frame.
+// bridge for an RPC. The encoding is negotiated from the first client frame:
+// text frames use protojson for the entire connection; binary frames use
+// proto.Marshal/Unmarshal. The server always mirrors the client's frame type.
 func RegisterBidiStreamProxy(rpc string, newRecv, newSend func() proto.Message) error {
 	if newRecv == nil || newSend == nil {
 		return fmt.Errorf("stream proxy requires newRecv and newSend factories")
@@ -226,20 +226,35 @@ func writeProxyError(c *fiber.Ctx, err error) error {
 // (cancelling the stream context unblocks RecvMsg, closing the socket unblocks
 // ReadMessage). Normal terminations (client close frame, server io.EOF) are
 // reported as a nil error.
+//
+// Encoding is determined by the first client frame: text frames (protojson)
+// or binary frames (proto wire format). The server mirrors the client's choice
+// for the lifetime of the connection.
 func proxyBidi(ctx context.Context, cancel context.CancelFunc, ws *websocket.Conn, stream grpc.ClientStream, codec *streamCodec) error {
+	// encodingC carries the binary flag from the first client frame to the server
+	// pump. Buffered so the client goroutine never blocks on send.
+	encodingC := make(chan bool, 1)
+
 	g := new(errgroup.Group)
 
 	// client -> server
 	g.Go(func() error {
+		binary := false
+		first := true
 		for {
-			_, data, err := ws.ReadMessage()
+			msgType, data, err := ws.ReadMessage()
 			if err != nil {
 				cancel()
 				_ = stream.CloseSend()
 				return err
 			}
+			if first {
+				binary = msgType == websocket.BinaryMessage
+				encodingC <- binary
+				first = false
+			}
 			msg := codec.newSend()
-			if err := protojson.Unmarshal(data, msg); err != nil {
+			if err := unmarshalWSFrame(binary, data, msg); err != nil {
 				cancel()
 				return sferrors.New(sferrors.CodeInvalidArgument, "stream frame does not match grpc input").WithCause(err)
 			}
@@ -252,16 +267,26 @@ func proxyBidi(ctx context.Context, cancel context.CancelFunc, ws *websocket.Con
 	// server -> client
 	g.Go(func() error {
 		defer ws.Close()
+		binary := false
+		// Wait for the encoding decision from the first client frame.
+		// If the context is cancelled before the client speaks, the client goroutine
+		// has already returned its own error; returning nil here lets g.Wait return
+		// that error unchanged.
+		select {
+		case binary = <-encodingC:
+		case <-ctx.Done():
+			return nil
+		}
 		for {
 			msg := codec.newRecv()
 			if err := stream.RecvMsg(msg); err != nil {
 				return err
 			}
-			data, err := protojson.MarshalOptions{UseProtoNames: true, EmitUnpopulated: true}.Marshal(msg)
+			data, wsType, err := marshalWSFrame(binary, msg)
 			if err != nil {
 				return err
 			}
-			if err := ws.WriteMessage(websocket.TextMessage, data); err != nil {
+			if err := ws.WriteMessage(wsType, data); err != nil {
 				return err
 			}
 		}
@@ -271,6 +296,27 @@ func proxyBidi(ctx context.Context, cancel context.CancelFunc, ws *websocket.Con
 		return err
 	}
 	return nil
+}
+
+// unmarshalWSFrame decodes a WebSocket frame into msg.
+// Binary frames (proto wire format) use proto.Unmarshal; text frames use protojson.
+func unmarshalWSFrame(binary bool, data []byte, msg proto.Message) error {
+	if binary {
+		return proto.Unmarshal(data, msg)
+	}
+	return protojson.Unmarshal(data, msg)
+}
+
+// marshalWSFrame encodes msg for a WebSocket frame, returning (data, wsMessageType, error).
+// Binary encoding produces a proto wire-format payload in a BinaryMessage frame;
+// JSON encoding produces a protojson payload in a TextMessage frame.
+func marshalWSFrame(binary bool, msg proto.Message) ([]byte, int, error) {
+	if binary {
+		data, err := proto.Marshal(msg)
+		return data, websocket.BinaryMessage, err
+	}
+	data, err := protojson.MarshalOptions{UseProtoNames: true, EmitUnpopulated: true}.Marshal(msg)
+	return data, websocket.TextMessage, err
 }
 
 // isNormalStreamClose reports whether an error represents an expected end of a

@@ -218,6 +218,104 @@ func TestServerStreamProxyDeliversSSE(t *testing.T) {
 	}
 }
 
+func TestBidiStreamProxyEchoesFrames_Binary(t *testing.T) {
+	registerEchoStreamProxy(t)
+	target := startEchoStreamServer(t)
+
+	addr := newStreamGateway(t, config.GatewayRouteConfig{
+		Name:   "echo-stream-binary",
+		Path:   "/ws/echo-bin",
+		Target: target,
+		RPC:    "/test.Echo/Stream",
+		Stream: "bidi",
+	})
+
+	conn := dialWS(t, "ws://"+addr+"/ws/echo-bin")
+	defer conn.Close()
+
+	for _, want := range []string{"hello", "world", "third frame"} {
+		data, err := proto.Marshal(&wrapperspb.StringValue{Value: want})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if err := conn.WriteMessage(wsclient.BinaryMessage, data); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		msgType, resp, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if msgType != wsclient.BinaryMessage {
+			t.Fatalf("frame type = %d, want BinaryMessage (%d)", msgType, wsclient.BinaryMessage)
+		}
+		got := &wrapperspb.StringValue{}
+		if err := proto.Unmarshal(resp, got); err != nil {
+			t.Fatalf("unmarshal response: %v", err)
+		}
+		if got.Value != want {
+			t.Fatalf("echo = %q, want %q", got.Value, want)
+		}
+	}
+}
+
+func TestBidiStreamProxyEncodingLockedPerConnection(t *testing.T) {
+	// Two concurrent connections on the same route: one text, one binary.
+	// Each should independently negotiate and maintain its own encoding.
+	registerEchoStreamProxy(t)
+	target := startEchoStreamServer(t)
+
+	addr := newStreamGateway(t, config.GatewayRouteConfig{
+		Name:   "echo-stream-mixed",
+		Path:   "/ws/echo-mixed",
+		Target: target,
+		RPC:    "/test.Echo/Stream",
+		Stream: "bidi",
+	})
+
+	textConn := dialWS(t, "ws://"+addr+"/ws/echo-mixed")
+	defer textConn.Close()
+	binConn := dialWS(t, "ws://"+addr+"/ws/echo-mixed")
+	defer binConn.Close()
+
+	// text connection: send JSON, expect text frame back
+	if err := textConn.WriteMessage(wsclient.TextMessage, []byte(`"ping"`)); err != nil {
+		t.Fatalf("text write: %v", err)
+	}
+	msgType, data, err := textConn.ReadMessage()
+	if err != nil {
+		t.Fatalf("text read: %v", err)
+	}
+	if msgType != wsclient.TextMessage {
+		t.Fatalf("text conn: frame type = %d, want TextMessage (%d)", msgType, wsclient.TextMessage)
+	}
+	if string(data) != `"ping"` {
+		t.Fatalf("text conn: echo = %s, want \"ping\"", data)
+	}
+
+	// binary connection: send proto binary, expect binary frame back
+	binData, err := proto.Marshal(&wrapperspb.StringValue{Value: "pong"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := binConn.WriteMessage(wsclient.BinaryMessage, binData); err != nil {
+		t.Fatalf("binary write: %v", err)
+	}
+	msgType, resp, err := binConn.ReadMessage()
+	if err != nil {
+		t.Fatalf("binary read: %v", err)
+	}
+	if msgType != wsclient.BinaryMessage {
+		t.Fatalf("binary conn: frame type = %d, want BinaryMessage (%d)", msgType, wsclient.BinaryMessage)
+	}
+	got := &wrapperspb.StringValue{}
+	if err := proto.Unmarshal(resp, got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Value != "pong" {
+		t.Fatalf("binary conn: echo = %q, want %q", got.Value, "pong")
+	}
+}
+
 func TestStreamRouteRequiresRegisteredProxy(t *testing.T) {
 	unregisterStreamProxy("/test.Echo/Stream")
 	target := startEchoStreamServer(t)
