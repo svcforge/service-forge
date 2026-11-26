@@ -35,10 +35,10 @@ Client -> REST/JSON Gateway -> gRPC Services -> Ports -> Adapters
 
 ## Install The CLI
 
-After the repository is published:
+Install the current preview with Go 1.25 or later. See the [changelog](CHANGELOG.md) for release and upgrade details.
 
 ```bash
-go install github.com/svcforge/service-forge/cmd/svcforge@latest
+go install github.com/svcforge/service-forge/cmd/svcforge@v0.1.0-preview.1
 ```
 
 While developing Service Forge locally, run the CLI from this repository:
@@ -56,11 +56,14 @@ go build -o ./bin/svcforge ./cmd/svcforge
 
 ## Create A Project
 
+Install Buf before generating the protobuf Go code.
+
 From inside the `service-forge` repository during local development:
 
 ```bash
 go run ./cmd/svcforge new demo
 cd demo
+buf generate
 go mod tidy
 ```
 
@@ -72,23 +75,25 @@ require github.com/svcforge/service-forge v0.0.0
 replace github.com/svcforge/service-forge => ..
 ```
 
-If you create a project somewhere else before Service Forge is published, pass
-the local framework path explicitly:
+To use a local framework checkout from another directory, pass its path explicitly:
 
 ```bash
 svcforge new demo --replace /path/to/service-forge
 ```
 
-When creating a project without a local `replace`, the generated `go.mod` omits
-the framework requirement. `go mod tidy` resolves
-`github.com/svcforge/service-forge` at the latest available version from the
-imports generated in the project.
-
-To upgrade an existing generated project later:
+To create a project that uses the published preview, run these commands outside
+the framework checkout. The version pin makes the generated project reproducible.
 
 ```bash
-go get github.com/svcforge/service-forge@latest
+svcforge new demo
+cd demo
+buf generate
+go get github.com/svcforge/service-forge@v0.1.0-preview.1
+go mod tidy
 ```
+
+Use the same versioned `go get` command to upgrade an existing project that
+resolves the framework from GitHub.
 
 ## Run The Generated Project
 
@@ -110,7 +115,13 @@ Try the generated gateway route:
 curl http://localhost:8080/api/v1/ping
 ```
 
-Expected response:
+The ping route checks the gateway. To verify forwarding to the running gRPC service, list the seeded todos:
+
+```bash
+curl --fail http://localhost:8080/api/v1/todos
+```
+
+Expected ping response:
 
 ```json
 {"code":"OK","message":"ok","data":{"message":"pong"},"timestamp":...}
@@ -605,43 +616,71 @@ single-threaded and parallel hot-path scenarios, plus the plugin chain
 (`BenchmarkProxyPluginChainParallel`) with the chain off, the core production
 set, and JWT auth on top.
 
-### End-To-End Results
+### End-to-end results
 
-Measured 2026-06-12 on Apple M5 Pro (18 cores), Go 1.26.2: wrk -> gateway ->
-gRPC backend over loopback, all on one machine, identical backend for every
-gateway. `wrk -t8 -c128 -d10s --latency`, mean of 3 runs, run-to-run variance
-under 4%. The grpc-gateway comparison handler mirrors protoc-gen-grpc-gateway
-generated code. Reproduce with the programs under `examples/bench/`.
+Measured November 26, 2026, on an Apple M5 Pro (18 cores), macOS arm64,
+Go 1.27.4 and wrk 4.2.0. The HTTP client, gateway and shared gRPC Health
+backend ran on one machine over loopback. The Go server processes used
+`GOMAXPROCS=8`. Each scenario had a 2-second warm-up and three 5-second
+measured runs with 8 wrk threads and 128 connections. The table shows the
+median across runs for each metric. wrk reported no socket errors or
+non-success responses in the measured runs.
 
-| Gateway | Requests/sec | p50 | p99 | Response size |
-|---|---|---|---|---|
-| Service Forge, no plugins | 97,016 | 1.19ms | 2.27ms | 254 B |
-| Service Forge, 5 plugins on | 89,545 (-7.7%) | 1.48ms | 3.40ms | 343 B |
-| grpc-gateway v2 | 81,779 | 1.50ms | 2.69ms | 174 B |
+| Gateway | Requests/sec | p50 | p99 |
+| --- | ---: | ---: | ---: |
+| Service Forge, no plugins | 113,833 | 1.01 ms | 1.97 ms |
+| Service Forge, five core plugins | 102,193 | 1.37 ms | 2.96 ms |
+| grpc-gateway v2 example | 96,874 | 1.22 ms | 2.48 ms |
 
-Notes:
+The core profile enables recovery, access logging, rate limiting, API-key auth
+and metrics. Access logs were written to a file. In this workload, the profile
+reduced Service Forge throughput by 10.2%. With plugins off, Service Forge had
+17.5% higher throughput than the grpc-gateway v2 example. The Service Forge
+Health handler uses a pre-encoded success payload inside its standard response
+envelope. The grpc-gateway example uses its standard response marshaler and a
+different response shape. The comparison applies to these Health implementations
+and this loopback setup.
 
-- Service Forge proxies the same route 18.6% faster than grpc-gateway while
-  returning a larger response (the standard envelope adds ~80 bytes).
-- "5 plugins on" is recovery, access_log, rate_limit, api_key and metrics —
-  with access_log writing a real structured log line per request (2.7M lines
-  over the run) and rate_limit attaching X-RateLimit-* response headers. The
-  full chain costs 7.7% throughput and still outruns plain grpc-gateway.
-- Numbers are REST/JSON to gRPC transcoding, Service Forge's target workload.
-  They are not comparable to plain HTTP reverse-proxy benchmarks
-  (Nginx/Envoy), and cross-hardware comparisons with published Kong/APISIX
-  figures are indicative only.
-
-Reproduce:
+Reproduce with the programs under `examples/bench/`:
 
 ```bash
-go run ./examples/bench/backend &
-go run ./examples/bench/svcforgegw &
-go run ./examples/bench/svcforgegw -port 8082 -plugins core &
-go run ./examples/bench/grpcgatewaygw &
-wrk -t8 -c128 -d10s --latency http://127.0.0.1:8080/api/health
-wrk -t8 -c128 -d10s --latency http://127.0.0.1:8081/api/health
-wrk -t8 -c128 -d10s --latency -H "X-API-Key: bench-key" http://127.0.0.1:8082/api/health
+export GOMAXPROCS=8
+# Start these in separate terminals, with the same GOMAXPROCS.
+go run ./examples/bench/backend
+go run ./examples/bench/svcforgegw
+go run ./examples/bench/svcforgegw -port 8082 -plugins core > core-access.log 2>&1
+go run ./examples/bench/grpcgatewaygw
+
+# Warm up each endpoint for 2s, then repeat each command three times.
+wrk -t8 -c128 -d5s --latency -H "X-API-Key: bench-key" http://127.0.0.1:8080/api/health
+wrk -t8 -c128 -d5s --latency -H "X-API-Key: bench-key" http://127.0.0.1:8082/api/health
+wrk -t8 -c128 -d5s --latency -H "X-API-Key: bench-key" http://127.0.0.1:8081/api/health
+```
+
+### Go microbenchmarks
+
+Nine scenarios were repeated ten times on the same host at `GOMAXPROCS=8`.
+Selected medians from benchstat:
+
+| Concurrent scenario | µs/op | KiB/op | Allocations/op |
+| --- | ---: | ---: | ---: |
+| Single connection, no route timeout | 10.82 | 10.06 | 149 |
+| Single connection, route timeout | 10.69 | 11.19 | 164 |
+| Eight connections, no route timeout | 12.27 | 10.22 | 158 |
+| Plugin benchmark, plugins off | 12.93 | 10.25 | 158 |
+| Plugin benchmark, core plugins | 12.75 | 11.29 | 186 |
+| Plugin benchmark, core plugins and JWT | 13.03 | 14.05 | 229 |
+
+The route timeout increased allocated bytes per operation by 11.2%, with no
+statistically significant timing difference. The eight-connection pool took
+13.4% more time per operation than a single connection on this workload. JWT
+added 2.2% time and 24.4% allocated bytes over the core profile. The plugin
+microbenchmark uses a no-op logger. Concurrent time per operation measures
+aggregate benchmark progress. The wrk table reports client-observed latency.
+
+```bash
+go test ./transport/gateway -run '^$' -bench . -benchmem -benchtime=500ms -count=10 -cpu=8 > bench.txt
+benchstat bench.txt
 ```
 
 ## Package Map
@@ -654,3 +693,31 @@ wrk -t8 -c128 -d10s --latency -H "X-API-Key: bench-key" http://127.0.0.1:8082/ap
 - `adapters/*`: Redis, Postgres, RabbitMQ, Consul, OpenTelemetry, memory, noop.
 - `transport/*`: gRPC server/client and REST Gateway.
 - `cmd/svcforge`: project scaffolding CLI.
+
+## Run Tests
+
+Run the unit and loopback integration tests, including the OTLP exporter, with
+the race detector:
+
+```bash
+go test -race -count=1 ./...
+```
+
+To include the generated project end-to-end test, install Buf,
+`protoc-gen-go`, and `protoc-gen-go-grpc` on your PATH, then set
+`SVCFORGE_TEST_E2E=1`. The test generates and builds a project in a temporary
+directory and uses local protobuf plugins.
+
+To include the external adapter tests, point the following variables at
+dedicated test instances:
+
+| Variable | Example |
+| --- | --- |
+| `SVCFORGE_TEST_POSTGRES_ADDR` | `127.0.0.1:5432` with database and user `postgres` and password `svcforge-test` |
+| `SVCFORGE_TEST_REDIS_ADDR` | `127.0.0.1:6379` |
+| `SVCFORGE_TEST_RABBITMQ_URL` | `amqp://guest:guest@127.0.0.1:5672/` |
+| `SVCFORGE_TEST_CONSUL_ADDR` | `127.0.0.1:8500` |
+
+Each external adapter test is skipped when its variable is unset. Use
+`go test -race -count=1 -v ./adapters -run Integration` to see which adapter
+tests ran.

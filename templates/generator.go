@@ -195,7 +195,7 @@ func detectLocalReplace(root, projectDir string) string {
 
 const projectGoMod = `module {{ .Name }}
 
-go 1.23
+go 1.25.0
 {{ if .Replace }}
 require github.com/svcforge/service-forge v0.0.0
 
@@ -242,7 +242,7 @@ services/example-service/internal/
 ## Local start
 
 ` + "```bash" + `
-buf generate          # generate gRPC stubs into api/gen (run first)
+buf generate          # generate gRPC stubs into api/gen/go (run first)
 go mod tidy
 go run ./services/example-service/cmd   # gRPC :9000
 go run ./gateway/cmd                     # REST :8080 (separate terminal)

@@ -1,0 +1,59 @@
+# Service Forge changelog
+
+## v0.1.0-preview.1 — November 26, 2026
+
+This preview improves startup failure reporting, runtime cleanup and gRPC
+service discovery. It also adds a repeatable test suite for generated projects
+and external adapters.
+
+### Runtime and gateway
+
+- Report the module name and lifecycle phase when initialization or startup
+  fails. During `Application.Run`, stop successfully initialized modules in
+  reverse order, including when initialization or startup fails partway through.
+  Run cleanup with a separate 15-second context and return shutdown errors
+  together with any startup error.
+- Bind the gateway listener before returning from startup. A port conflict
+  now fails startup immediately. Close static connection pools and cached
+  service-discovery connections during shutdown, and close partially initialized
+  route connections when gateway initialization fails.
+- Close the gRPC listener if registration fails, report the transport as healthy
+  while it is serving, and log unexpected serve failures.
+- Reuse a single cached gRPC connection for concurrent dials to the same target.
+  Rotate through unique discovered addresses and format IPv6 endpoints correctly.
+
+### Scaffolding and upgrade
+
+- Generated modules declare Go 1.25.0, matching the framework baseline.
+- The quickstart generates protobuf code before resolving Go dependencies. The
+  Todo endpoint verifies the complete HTTP-to-gRPC path.
+- Install the preview CLI with
+  `go install github.com/svcforge/service-forge/cmd/svcforge@v0.1.0-preview.1`.
+  Projects using published modules can update with
+  `go get github.com/svcforge/service-forge@v0.1.0-preview.1` followed by
+  `go mod tidy`.
+- Custom modules should release partial resources inside a failing `Init`.
+  After a successful `Init`, `Stop` must be safe even when `Start` was
+  skipped or failed. Callers of `Application.Stop` and `Application.Run`
+  should handle returned shutdown errors.
+- If a generated project uses a local `replace`, adjust it when moving the
+  framework checkout. Sibling checkouts can use `../service-forge`.
+
+### Verification
+
+- The generated-project test exercises the CLI, protobuf generation with local
+  plugins, compilation, Todo CRUD through the gateway and graceful shutdown.
+- Lifecycle regression tests cover rollback, port conflicts, connection
+  cleanup, concurrent dialing and gRPC registration failures.
+- Integration tests exercise PostgreSQL transactions, Redis cache operations,
+  RabbitMQ delivery, Consul registration and OpenTelemetry OTLP export.
+- The full suite passed with the Go race detector. It recorded 99 passing tests
+  and subtests, no skips, and 61.0% statement coverage.
+
+### Benchmark
+
+On an Apple M5 Pro, the no-plugin HTTP-to-gRPC Health example reached
+113,833 requests/second at 1.97 ms p99. With five core plugins and access logs
+written to a file, it reached 102,193 requests/second at 2.96 ms p99.
+See [Benchmarks](README.md#benchmarks) for the grpc-gateway comparison, test
+conditions, workload details and reproduction commands.

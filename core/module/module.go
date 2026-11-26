@@ -24,6 +24,8 @@ type Runtime interface {
 }
 
 // Module is the lifecycle contract for runtime components.
+// A failed Init must release its own resources. After a successful Init, Stop
+// must release resources even if Start was skipped or failed.
 type Module interface {
 	Name() string
 	Init(ctx context.Context, app Runtime) error

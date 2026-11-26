@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -91,55 +93,73 @@ func (a *Application) Health(ctx context.Context) health.Report {
 }
 
 func (a *Application) Init(ctx context.Context) error {
-	for _, mod := range a.modules {
+	_, err := a.initModules(ctx)
+	return err
+}
+
+func (a *Application) initModules(ctx context.Context) (int, error) {
+	for i, mod := range a.modules {
 		a.logModuleLifecycle("initializing module", mod.Name())
 		if err := mod.Init(ctx, a); err != nil {
-			return err
+			return i, fmt.Errorf("initialize module %s: %w", mod.Name(), err)
 		}
 	}
-	return nil
+	return len(a.modules), nil
 }
 
 func (a *Application) Start(ctx context.Context) error {
 	for _, mod := range a.modules {
 		a.logModuleLifecycle("starting module", mod.Name())
 		if err := mod.Start(ctx); err != nil {
-			return err
+			return fmt.Errorf("start module %s: %w", mod.Name(), err)
 		}
 	}
 	return nil
 }
 
 func (a *Application) Stop(ctx context.Context) error {
-	for i := len(a.modules) - 1; i >= 0; i-- {
+	return a.stopModules(ctx, len(a.modules))
+}
+
+func (a *Application) stopModules(ctx context.Context, count int) error {
+	var stopErr error
+	for i := count - 1; i >= 0; i-- {
 		mod := a.modules[i]
 		a.logModuleLifecycle("stopping module", mod.Name())
 		if err := mod.Stop(ctx); err != nil {
 			a.coreLog.Error("module stop failed", "module", mod.Name(), "error", err)
+			stopErr = errors.Join(stopErr, fmt.Errorf("stop module %s: %w", mod.Name(), err))
 		}
 	}
-	return nil
+	return stopErr
 }
 
-func (a *Application) Run(ctx context.Context) error {
-	if err := a.Init(ctx); err != nil {
+func (a *Application) Run(ctx context.Context) (runErr error) {
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(quit)
+
+	initialized, err := a.initModules(ctx)
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := a.stopModules(shutdownCtx, initialized); err != nil {
+			runErr = errors.Join(runErr, err)
+		}
+	}()
+	if err != nil {
 		return err
 	}
 	if err := a.Start(ctx); err != nil {
 		return err
 	}
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	select {
 	case <-ctx.Done():
 	case sig := <-quit:
 		a.coreLog.Info("received shutdown signal", "signal", sig.String())
 	}
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	return a.Stop(shutdownCtx)
+	return nil
 }
 
 func (a *Application) logModuleLifecycle(message, moduleName string) {

@@ -3,6 +3,9 @@ package grpcclient
 import (
 	"context"
 	"fmt"
+	"net"
+	"slices"
+	"strconv"
 	"sync"
 
 	"github.com/svcforge/service-forge/ports/registry"
@@ -15,6 +18,7 @@ type Dialer struct {
 	mu       sync.Mutex
 	conns    map[string]*grpc.ClientConn
 	options  []grpc.DialOption
+	next     map[string]int
 }
 
 func NewDialer(resolver registry.Resolver, opts ...grpc.DialOption) *Dialer {
@@ -25,25 +29,21 @@ func NewDialer(resolver registry.Resolver, opts ...grpc.DialOption) *Dialer {
 		resolver: resolver,
 		conns:    map[string]*grpc.ClientConn{},
 		options:  opts,
+		next:     make(map[string]int),
 	}
 }
 
 func (d *Dialer) DialTarget(ctx context.Context, target string) (*grpc.ClientConn, error) {
 	d.mu.Lock()
+	defer d.mu.Unlock()
 	if conn, ok := d.conns[target]; ok {
-		d.mu.Unlock()
 		return conn, nil
 	}
-	d.mu.Unlock()
-
 	conn, err := grpc.NewClient(target, d.options...)
 	if err != nil {
 		return nil, err
 	}
-
-	d.mu.Lock()
 	d.conns[target] = conn
-	d.mu.Unlock()
 	return conn, nil
 }
 
@@ -62,8 +62,17 @@ func (d *Dialer) DialService(ctx context.Context, serviceName string) (*grpc.Cli
 	if len(instances) == 0 {
 		return nil, fmt.Errorf("service not found: %s", serviceName)
 	}
-	target := fmt.Sprintf("%s:%d", instances[0].Address, instances[0].Port)
-	return d.DialTarget(ctx, target)
+	targets := make([]string, 0, len(instances))
+	for _, instance := range instances {
+		targets = append(targets, net.JoinHostPort(instance.Address, strconv.Itoa(instance.Port)))
+	}
+	slices.Sort(targets)
+	targets = slices.Compact(targets)
+	d.mu.Lock()
+	index := d.next[serviceName] % len(targets)
+	d.next[serviceName] = (index + 1) % len(targets)
+	d.mu.Unlock()
+	return d.DialTarget(ctx, targets[index])
 }
 
 func (d *Dialer) Close() error {

@@ -2,8 +2,10 @@ package grpcserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,7 +27,7 @@ type Module struct {
 	port        int
 	server      *grpc.Server
 	health      *health.Server
-	listener    net.Listener
+	serving     atomic.Bool
 	registers   []RegisterFunc
 	registrar   registry.Registrar
 	serviceID   string
@@ -78,13 +80,11 @@ func (m *Module) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	m.listener = listener
-	m.health.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
 	if m.registrar != nil {
-		m.serviceID = fmt.Sprintf("%s-%s", m.serviceName, uuid.NewString())
+		serviceID := fmt.Sprintf("%s-%s", m.serviceName, uuid.NewString())
 		registerAddr := hostForRegistry(m.address)
 		if err := m.registrar.Register(ctx, registry.ServiceInstance{
-			ID:       m.serviceID,
+			ID:       serviceID,
 			Name:     m.serviceName,
 			Address:  registerAddr,
 			Port:     m.port,
@@ -92,19 +92,26 @@ func (m *Module) Start(ctx context.Context) error {
 			Tags:     []string{"grpc"},
 			Metadata: map[string]string{"transport": "grpc"},
 		}); err != nil {
-			return err
+			return errors.Join(err, listener.Close())
 		}
+		m.serviceID = serviceID
 	}
+	m.serving.Store(true)
+	m.health.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
 	if m.logger != nil {
 		m.logger.Info("grpc server listening", "address", config.Address(m.address, m.port))
 	}
 	go func() {
-		_ = m.server.Serve(listener)
+		defer m.serving.Store(false)
+		if err := m.server.Serve(listener); err != nil && !errors.Is(err, grpc.ErrServerStopped) && m.logger != nil {
+			m.logger.Error("grpc server stopped serving", "error", err)
+		}
 	}()
 	return nil
 }
 
 func (m *Module) Stop(ctx context.Context) error {
+	m.serving.Store(false)
 	if m.health != nil {
 		m.health.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
 	}
@@ -133,7 +140,7 @@ func (m *Module) Stop(ctx context.Context) error {
 }
 
 func (m *Module) Health(ctx context.Context) error {
-	if m.listener == nil {
+	if !m.serving.Load() {
 		return fmt.Errorf("grpc server is not listening")
 	}
 	return nil

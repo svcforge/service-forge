@@ -2,7 +2,9 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -33,6 +35,8 @@ type Gateway struct {
 	configuredRoutes []*proxyRoute
 	globalSkips      []routePluginSkip
 	address          string
+	listener         net.Listener
+	dialer           *grpcclient.Dialer
 }
 
 func New(routes ...RouteFunc) *Gateway {
@@ -59,7 +63,7 @@ func (g *Gateway) Init(ctx context.Context, runtime module.Runtime) error {
 		return err
 	}
 	if err := g.mountConfiguredRoutes(ctx, cfg, runtime); err != nil {
-		return err
+		return errors.Join(err, g.closeProxyConnections())
 	}
 	for _, route := range g.routes {
 		route(g.app, g)
@@ -79,7 +83,8 @@ func (g *Gateway) mountConfiguredRoutes(ctx context.Context, cfg *config.Config,
 			resolver = candidate
 		}
 	}
-	proxy := newGRPCProxy(grpcclient.NewDialer(resolver))
+	g.dialer = grpcclient.NewDialer(resolver)
+	proxy := newGRPCProxy(g.dialer)
 	for _, routeCfg := range cfg.Gateway.Routes {
 		route, err := newProxyRoute(routeCfg)
 		if err != nil {
@@ -109,6 +114,7 @@ func (g *Gateway) mountConfiguredRoutes(ctx context.Context, cfg *config.Config,
 			}
 			route.invoker = invoker
 		}
+		g.configuredRoutes = append(g.configuredRoutes, route)
 		if strings.TrimSpace(route.cfg.Target) != "" {
 			poolSize := route.cfg.PoolSize
 			if poolSize <= 0 {
@@ -123,7 +129,6 @@ func (g *Gateway) mountConfiguredRoutes(ctx context.Context, cfg *config.Config,
 				route.conns = append(route.conns, conn)
 			}
 		}
-		g.configuredRoutes = append(g.configuredRoutes, route)
 		routeHandlers, err := g.buildRoutePlugins(cfg, routeCfg)
 		if err != nil {
 			return err
@@ -189,23 +194,46 @@ func (g *Gateway) mountSSERoute(route *proxyRoute, routeHandlers []fiber.Handler
 }
 
 func (g *Gateway) Start(ctx context.Context) error {
+	listener, err := net.Listen("tcp", g.address)
+	if err != nil {
+		return err
+	}
+	g.listener = listener
 	if g.logger != nil {
-		g.logger.Info("gateway listening", "address", g.address)
+		g.logger.Info("gateway listening", "address", listener.Addr().String())
 	}
 	go func() {
-		_ = g.app.Listen(g.address)
+		if err := g.app.Listener(listener); err != nil && !errors.Is(err, net.ErrClosed) && g.logger != nil {
+			g.logger.Error("gateway stopped serving", "error", err)
+		}
 	}()
 	return nil
 }
 
 func (g *Gateway) Stop(ctx context.Context) error {
-	err := g.app.ShutdownWithContext(ctx)
+	var err error
+	if g.listener != nil {
+		err = g.app.ShutdownWithContext(ctx)
+		// Shutdown can run before Fiber has registered the listener.
+		if closeErr := g.listener.Close(); !errors.Is(closeErr, net.ErrClosed) {
+			err = errors.Join(err, closeErr)
+		}
+		g.listener = nil
+	}
+	return errors.Join(err, g.closeProxyConnections())
+}
+
+func (g *Gateway) closeProxyConnections() error {
+	var err error
 	for _, route := range g.configuredRoutes {
 		for _, conn := range route.conns {
-			if closeErr := conn.Close(); err == nil && closeErr != nil {
-				err = closeErr
-			}
+			err = errors.Join(err, conn.Close())
 		}
+	}
+	g.configuredRoutes = nil
+	if g.dialer != nil {
+		err = errors.Join(err, g.dialer.Close())
+		g.dialer = nil
 	}
 	return err
 }
