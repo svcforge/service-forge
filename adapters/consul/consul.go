@@ -2,7 +2,8 @@ package consul
 
 import (
 	"context"
-	"fmt"
+	"net"
+	"strconv"
 
 	consulapi "github.com/hashicorp/consul/api"
 	"github.com/svcforge/service-forge/core/config"
@@ -43,7 +44,7 @@ func (r *Registry) Register(ctx context.Context, service registry.ServiceInstanc
 		Port:    service.Port,
 		Meta:    service.Metadata,
 		Check: &consulapi.AgentServiceCheck{
-			GRPC:                           fmt.Sprintf("%s:%d", service.Address, service.Port),
+			GRPC:                           net.JoinHostPort(service.Address, strconv.Itoa(service.Port)),
 			Interval:                       "10s",
 			Timeout:                        "2s",
 			DeregisterCriticalServiceAfter: "1m",
@@ -56,7 +57,7 @@ func (r *Registry) Deregister(ctx context.Context, serviceID string) error {
 }
 
 func (r *Registry) Resolve(ctx context.Context, serviceName string) ([]registry.ServiceInstance, error) {
-	entries, _, err := r.client.Health().Service(serviceName, "", true, nil)
+	entries, _, err := r.client.Health().Service(serviceName, "", true, (&consulapi.QueryOptions{}).WithContext(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -98,6 +99,7 @@ func (m *Module) Init(ctx context.Context, app module.Runtime) error {
 	}
 	m.registry = reg
 	app.Set("registry", reg)
+	app.Set(registry.RouteCatalogKey, reg)
 	app.Set("registrar", reg)
 	app.Set("resolver", reg)
 	return nil

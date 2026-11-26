@@ -25,17 +25,28 @@ type ServerConfig struct {
 }
 
 type GRPCConfig struct {
-	ListenIP   string `yaml:"listen_ip" json:"listen_ip"`
-	RegisterIP string `yaml:"register_ip" json:"register_ip"`
-	Port       int    `yaml:"port" json:"port"`
+	PublishRoutes bool   `yaml:"publish_routes" json:"publish_routes"`
+	ListenIP      string `yaml:"listen_ip" json:"listen_ip"`
+	RegisterIP    string `yaml:"register_ip" json:"register_ip"`
+	Port          int    `yaml:"port" json:"port"`
 }
 
 type GatewayConfig struct {
+	DynamicRoutes         DynamicRoutesConfig   `yaml:"dynamic_routes" json:"dynamic_routes"`
 	ListenIP              string                `yaml:"listen_ip" json:"listen_ip"`
 	Port                  int                   `yaml:"port" json:"port"`
 	DisableStartupMessage bool                  `yaml:"disable_startup_message" json:"disable_startup_message"`
 	Plugins               []GatewayPluginConfig `yaml:"plugins" json:"plugins"`
 	Routes                []GatewayRouteConfig  `yaml:"routes" json:"routes"`
+}
+
+type DynamicRoutesConfig struct {
+	Services     map[string]string `yaml:"services" json:"services"`
+	PollInterval time.Duration     `yaml:"poll_interval" json:"poll_interval"`
+	Timeout      time.Duration     `yaml:"timeout" json:"timeout"`
+	Plugins []GatewayPluginConfig `yaml:"plugins" json:"plugins"`
+	PublicRPCs []string `yaml:"public_rpcs" json:"public_rpcs"`
+	ForwardClaims []ClaimForwardConfig `yaml:"forward_claims" json:"forward_claims"`
 }
 
 type GatewayRouteConfig struct {
