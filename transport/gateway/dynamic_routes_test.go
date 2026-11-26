@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/svcforge/service-forge/core/app"
 	"github.com/svcforge/service-forge/core/config"
 	"github.com/svcforge/service-forge/ports/registry"
@@ -42,6 +43,10 @@ func (r *testRouteCatalog) LoadRoutes(context.Context, string) ([]byte, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return bytes.Clone(r.manifest), nil
+}
+
+func (r *testRouteCatalog) ListRouteServices(context.Context) ([]string, error) {
+	return []string{"echo-service"}, nil
 }
 
 func (r *testRouteCatalog) Register(_ context.Context, instance registry.ServiceInstance) error {
@@ -94,6 +99,12 @@ func testRouteDescriptor(t *testing.T, path string) *descriptorpb.FileDescriptor
 }
 
 func TestDynamicRoutePublicationAndReload(t *testing.T) {
+	t.Run("gateway policy", func(t *testing.T) { testDynamicRoutePublicationAndReload(t, "gateway") })
+	t.Run("service policy", func(t *testing.T) { testDynamicRoutePublicationAndReload(t, "service") })
+	t.Run("proto annotations", func(t *testing.T) { testDynamicRoutePublicationAndReload(t, "proto") })
+}
+
+func testDynamicRoutePublicationAndReload(t *testing.T, mode string) {
 	const service = "echo-service"
 	const rpcService = "svcforge_dynamic_test.Echo"
 	const firstPath = "/api/echo/{id}"
@@ -104,7 +115,25 @@ func TestDynamicRoutePublicationAndReload(t *testing.T) {
 	cfg := config.Default()
 	cfg.Gateway.ListenIP = "127.0.0.1"
 	cfg.Gateway.Port = 0
-	cfg.Gateway.DynamicRoutes.Services = map[string]string{service: "/api/echo"}
+	var policy *config.PublishedRoutePolicy
+	var token string
+	if mode != "gateway" {
+		secretEnv := "JWT_SECRET"
+		if mode == "service" {
+			secretEnv = "TEST_JWT_SECRET"
+			policy = &config.PublishedRoutePolicy{Prefix: "/api/echo", JWTSecretEnv: secretEnv}
+		}
+		t.Setenv(secretEnv, "only-for-this-test")
+		signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+			"account_id": "123", "exp": time.Now().Add(time.Minute).Unix(),
+		}).SignedString([]byte("only-for-this-test"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		token = signed
+	} else {
+		cfg.Gateway.DynamicRoutes.Services = map[string]string{service: "/api/echo"}
+	}
 	cfg.Gateway.DynamicRoutes.PollInterval = 20 * time.Millisecond
 	cfg.Gateway.Plugins = []config.GatewayPluginConfig{
 		{Name: "api_key", Config: map[string]any{"keys": []any{"test-key"}}},
@@ -133,6 +162,9 @@ func TestDynamicRoutePublicationAndReload(t *testing.T) {
 			t.Fatal(err)
 		}
 		req.Header.Set("X-API-Key", key)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
 		resp, err := client.Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -178,7 +210,8 @@ func TestDynamicRoutePublicationAndReload(t *testing.T) {
 	serviceCfg.App.Name = service
 	serviceCfg.GRPC.ListenIP = "127.0.0.1"
 	serviceCfg.GRPC.Port = reserved.Addr().(*net.TCPAddr).Port
-	serviceCfg.GRPC.PublishRoutes = true
+	serviceCfg.GRPC.PublishRoutes = mode != "proto"
+	serviceCfg.GRPC.RoutePolicy = policy
 	reserved.Close()
 	serviceRuntime := app.New(serviceCfg)
 	serviceRuntime.Set(registry.RouteCatalogKey, store)
@@ -213,6 +246,14 @@ func TestDynamicRoutePublicationAndReload(t *testing.T) {
 		}
 	}
 	checkEcho("/api/echo/1")
+	if mode != "gateway" {
+		saved := token
+		token = ""
+		if status, _ := request(http.MethodPost, "/api/echo/1", "test-key"); status != http.StatusUnauthorized {
+			t.Fatalf("published JWT was not enforced: %d", status)
+		}
+		token = saved
+	}
 	if status, _ := request(http.MethodPost, "/api/echo/1", ""); status != http.StatusUnauthorized {
 		t.Fatalf("dynamic route bypassed global auth: %d", status)
 	}
@@ -228,7 +269,12 @@ func TestDynamicRoutePublicationAndReload(t *testing.T) {
 	if err := files.RegisterFile(changed); err != nil {
 		t.Fatal(err)
 	}
-	manifest, err := routeconfig.Encode([]string{rpcService}, files)
+	var manifest []byte
+	if mode == "proto" {
+		manifest, err = routeconfig.EncodeAnnotated([]string{rpcService}, files)
+	} else {
+		manifest, err = routeconfig.EncodeWithPolicy([]string{rpcService}, files, policy)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

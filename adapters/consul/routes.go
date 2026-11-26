@@ -5,9 +5,12 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strings"
 
 	consulapi "github.com/hashicorp/consul/api"
 )
+
+const routePrefix = "svcforge/routes/v1/"
 
 var routeServiceName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 
@@ -15,7 +18,7 @@ func routeKey(service string) (string, error) {
 	if !routeServiceName.MatchString(service) {
 		return "", fmt.Errorf("invalid route catalog service name %q", service)
 	}
-	return "svcforge/routes/v1/" + service, nil
+	return routePrefix + service, nil
 }
 
 func (r *Registry) PublishRoutes(ctx context.Context, service string, manifest []byte) error {
@@ -55,4 +58,19 @@ func (r *Registry) LoadRoutes(ctx context.Context, service string) ([]byte, erro
 		return nil, err
 	}
 	return pair.Value, nil
+}
+
+func (r *Registry) ListRouteServices(ctx context.Context) ([]string, error) {
+	keys, _, err := r.client.KV().Keys(routePrefix, "", (&consulapi.QueryOptions{}).WithContext(ctx))
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, key := range keys {
+		name := strings.TrimPrefix(key, routePrefix)
+		if routeServiceName.MatchString(name) {
+			names = append(names, name)
+		}
+	}
+	return names, nil
 }

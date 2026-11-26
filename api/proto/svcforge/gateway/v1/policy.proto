@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package svcforge.gateway.v1;
+
+import "google/protobuf/descriptor.proto";
+
+option go_package = "github.com/svcforge/service-forge/api/gen/go/svcforge/gateway/v1;gatewayv1";
+
+extend google.protobuf.MethodOptions {
+  // Exempts an HTTP-mapped RPC from gateway bearer-token authentication.
+  bool allow_anonymous = 51001;
+}
+
+extend google.protobuf.ServiceOptions {
+  // Requires account_id on protected RPCs and forwards it as x-account-id.
+  bool forward_account_id = 51002;
+}

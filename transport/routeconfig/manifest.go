@@ -5,9 +5,14 @@ package routeconfig
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
+
+	gatewayv1 "github.com/svcforge/service-forge/api/gen/go/svcforge/gateway/v1"
+	"github.com/svcforge/service-forge/core/config"
 
 	"google.golang.org/genproto/googleapis/api/annotations"
 	"google.golang.org/protobuf/proto"
@@ -21,26 +26,62 @@ import (
 const MaxManifestSize = 384 * 1024
 
 type manifest struct {
-	Services []string `json:"services"`
-	Files    []byte   `json:"files"`
+	Services  []string                     `json:"services"`
+	Files     []byte                       `json:"files"`
+	Policy    *config.PublishedRoutePolicy `json:"policy,omitempty"`
+	Automatic bool                         `json:"automatic,omitempty"`
 }
 
 type Route struct {
-	Method string
-	Path   string
-	Body   string
-	RPC    string
-	Stream bool
-	Input  protoreflect.MessageDescriptor
-	Output protoreflect.MessageDescriptor
-	Types  *dynamicpb.Types
+	Method           string
+	Path             string
+	Body             string
+	RPC              string
+	Stream           bool
+	AllowAnonymous   bool
+	ForwardAccountID bool
+	Input            protoreflect.MessageDescriptor
+	Output           protoreflect.MessageDescriptor
+	Types            *dynamicpb.Types
+}
+
+var jwtSecretEnvName = regexp.MustCompile(`^(?:[A-Z][A-Z0-9_]*_)?JWT_SECRET$`)
+
+func validatePolicy(policy *config.PublishedRoutePolicy) error {
+	if policy == nil {
+		return nil
+	}
+	if policy.JWTSecretEnv != "" && !jwtSecretEnvName.MatchString(policy.JWTSecretEnv) {
+		return fmt.Errorf("jwt_secret_env must name JWT_SECRET or *_JWT_SECRET")
+	}
+	for _, claim := range policy.ForwardClaims {
+		if claim.Default != nil {
+			return fmt.Errorf("published forward_claims require a verified claim and cannot set a default")
+		}
+	}
+	return nil
 }
 
 func Revision(data []byte) string { return fmt.Sprintf("%x", sha256.Sum256(data)) }
 
 // Encode includes descriptors only for services actually registered on the server.
 func Encode(services []string, files *protoregistry.Files) ([]byte, error) {
-	out := manifest{}
+	return EncodeWithPolicy(services, files, nil)
+}
+
+func EncodeWithPolicy(services []string, files *protoregistry.Files, policy *config.PublishedRoutePolicy) ([]byte, error) {
+	return encode(services, files, manifest{Policy: policy})
+}
+
+// EncodeAnnotated uses HTTP and gateway annotations as the complete route policy.
+func EncodeAnnotated(services []string, files *protoregistry.Files) ([]byte, error) {
+	return encode(services, files, manifest{Automatic: true})
+}
+
+func encode(services []string, files *protoregistry.Files, out manifest) ([]byte, error) {
+	if err := validatePolicy(out.Policy); err != nil {
+		return nil, err
+	}
 	descriptors := &descriptorpb.FileDescriptorSet{}
 	seen := make(map[string]bool)
 	var addFile func(protoreflect.FileDescriptor)
@@ -58,6 +99,9 @@ func Encode(services []string, files *protoregistry.Files) ([]byte, error) {
 	slices.Sort(services)
 	for _, name := range services {
 		desc, err := files.FindDescriptorByName(protoreflect.FullName(name))
+		if out.Automatic && errors.Is(err, protoregistry.NotFound) {
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -72,6 +116,9 @@ func Encode(services []string, files *protoregistry.Files) ([]byte, error) {
 				break
 			}
 		}
+	}
+	if out.Automatic && len(out.Services) == 0 {
+		return nil, nil
 	}
 	var err error
 	out.Files, err = proto.MarshalOptions{Deterministic: true}.Marshal(descriptors)
@@ -88,14 +135,39 @@ func Encode(services []string, files *protoregistry.Files) ([]byte, error) {
 	return data, nil
 }
 
+type DecodedManifest struct {
+	Routes    []Route
+	Policy    *config.PublishedRoutePolicy
+	Automatic bool
+}
+
 func Decode(data []byte) ([]Route, error) {
+	spec, err := DecodeManifest(data)
+	return spec.Routes, err
+}
+
+func DecodeManifest(data []byte) (DecodedManifest, error) {
 	if len(data) > MaxManifestSize {
-		return nil, fmt.Errorf("route manifest exceeds %d bytes", MaxManifestSize)
+		return DecodedManifest{}, fmt.Errorf("route manifest exceeds %d bytes", MaxManifestSize)
 	}
 	var spec manifest
 	if err := json.Unmarshal(data, &spec); err != nil {
-		return nil, err
+		return DecodedManifest{}, err
 	}
+	if spec.Automatic && spec.Policy != nil {
+		return DecodedManifest{}, fmt.Errorf("route manifest cannot combine automatic and explicit policy")
+	}
+	if err := validatePolicy(spec.Policy); err != nil {
+		return DecodedManifest{}, err
+	}
+	routes, err := decodeRoutes(spec)
+	if err != nil {
+		return DecodedManifest{}, err
+	}
+	return DecodedManifest{Routes: routes, Policy: spec.Policy, Automatic: spec.Automatic}, nil
+}
+
+func decodeRoutes(spec manifest) ([]Route, error) {
 	var descriptors descriptorpb.FileDescriptorSet
 	if err := proto.Unmarshal(spec.Files, &descriptors); err != nil {
 		return nil, err
@@ -163,6 +235,8 @@ func decodeRule(service protoreflect.ServiceDescriptor, method protoreflect.Meth
 	if route.Method == "" || !strings.HasPrefix(route.Path, "/") || rule.GetResponseBody() != "" {
 		return Route{}, fmt.Errorf("unsupported HTTP annotation")
 	}
+	route.AllowAnonymous, _ = proto.GetExtension(method.Options(), gatewayv1.E_AllowAnonymous).(bool)
+	route.ForwardAccountID, _ = proto.GetExtension(service.Options(), gatewayv1.E_ForwardAccountId).(bool)
 	route.Stream = method.IsStreamingClient() && method.IsStreamingServer()
 	if route.Stream && (route.Method != "GET" || route.Body != "" || strings.Contains(route.Path, "{")) {
 		return Route{}, fmt.Errorf("a WebSocket RPC requires a literal GET mapping without a body")

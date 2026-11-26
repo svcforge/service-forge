@@ -12,3 +12,8 @@ type RouteCatalog interface {
 	PublishRoutes(ctx context.Context, service string, manifest []byte) error
 	LoadRoutes(ctx context.Context, service string) ([]byte, error)
 }
+
+// RouteCatalogLister lets gateways discover publisher-managed manifests.
+type RouteCatalogLister interface {
+	ListRouteServices(ctx context.Context) ([]string, error)
+}

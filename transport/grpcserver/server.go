@@ -77,22 +77,31 @@ func (m *Module) Init(ctx context.Context, app module.Runtime) error {
 			m.registrar = registrar
 		}
 	}
-	if cfg.GRPC.PublishRoutes {
-		raw, _ := app.Get(registry.RouteCatalogKey)
-		catalog, ok := raw.(registry.RouteCatalog)
-		if !ok || m.registrar == nil {
-			return fmt.Errorf("publishing routes requires a route catalog and service registrar")
-		}
+	raw, _ := app.Get(registry.RouteCatalogKey)
+	catalog, canPublish := raw.(registry.RouteCatalog)
+	_, canDiscover := raw.(registry.RouteCatalogLister)
+	if cfg.GRPC.PublishRoutes && (!canPublish || m.registrar == nil) {
+		return fmt.Errorf("publishing routes requires a route catalog and service registrar")
+	}
+	if canPublish && m.registrar != nil && (cfg.GRPC.PublishRoutes || canDiscover) {
 		serviceInfo := m.server.GetServiceInfo()
 		names := make([]string, 0, len(serviceInfo))
 		for name := range serviceInfo {
 			names = append(names, name)
 		}
-		manifest, err := routeconfig.Encode(names, protoregistry.GlobalFiles)
+		var manifest []byte
+		var err error
+		if cfg.GRPC.PublishRoutes {
+			manifest, err = routeconfig.EncodeWithPolicy(names, protoregistry.GlobalFiles, cfg.GRPC.RoutePolicy)
+		} else {
+			manifest, err = routeconfig.EncodeAnnotated(names, protoregistry.GlobalFiles)
+		}
 		if err != nil {
 			return fmt.Errorf("encode routes: %w", err)
 		}
-		m.routeCatalog, m.routeManifest = catalog, manifest
+		if len(manifest) != 0 {
+			m.routeCatalog, m.routeManifest = catalog, manifest
+		}
 	}
 	app.Set("grpc_server", m.server)
 	return nil

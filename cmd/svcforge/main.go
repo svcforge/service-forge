@@ -1,9 +1,11 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/svcforge/service-forge/templates"
@@ -77,15 +79,31 @@ func protoCmd() *cobra.Command {
 	}
 	cmd.AddCommand(&cobra.Command{
 		Use:   "gen",
-		Short: "Run buf generate when buf is installed",
+		Short: "Install the gateway policy schema and run buf generate",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_, err := exec.LookPath("buf")
+			buf, err := exec.LookPath("buf")
 			if err != nil {
 				return fmt.Errorf("buf is not installed: %w", err)
 			}
-			run := exec.Command("buf", "generate")
-			run.Stdout = os.Stdout
-			run.Stderr = os.Stderr
+			bufArgs := []string{"generate"}
+			stat, err := os.Stat(filepath.Join("api", "proto"))
+			switch {
+			case err == nil && stat.IsDir():
+				if err := templates.EnsureGatewayPolicy("."); err != nil {
+					return err
+				}
+				var cleanup func()
+				bufArgs, cleanup, err = bufGenerateArgs()
+				if err != nil {
+					return err
+				}
+				defer cleanup()
+			case err != nil && !errors.Is(err, os.ErrNotExist):
+				return err
+			}
+			run := exec.CommandContext(cmd.Context(), buf, bufArgs...)
+			run.Stdout = cmd.OutOrStdout()
+			run.Stderr = cmd.ErrOrStderr()
 			return run.Run()
 		},
 	})

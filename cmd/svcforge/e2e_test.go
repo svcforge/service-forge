@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	gatewaypolicy "github.com/svcforge/service-forge/api/proto/svcforge/gateway/v1"
 )
 
 func TestGeneratedProjectEndToEnd(t *testing.T) {
@@ -46,7 +48,63 @@ func TestGeneratedProjectEndToEnd(t *testing.T) {
 		"remote: buf.build/protocolbuffers/go", "local: protoc-gen-go",
 		"remote: buf.build/grpc/go", "local: protoc-gen-go-grpc",
 	))
+	policyPath := filepath.Join(project, gatewaypolicy.ProjectPath)
+	assertPolicy := func() {
+		t.Helper()
+		data, err := os.ReadFile(policyPath)
+		if err != nil || string(data) != gatewaypolicy.Schema() {
+			t.Fatalf("project policy schema differs from the framework: %v", err)
+		}
+	}
+	assertPolicy()
+	protoFile := filepath.Join(project, "api", "proto", "example", "v1", "example.proto")
+	rewriteFile(t, protoFile, strings.NewReplacer(
+		"package example.v1;", "package example.v1;\nimport \"svcforge/gateway/v1/policy.proto\";",
+		"service ExampleService {", "service ExampleService {\n  option (svcforge.gateway.v1.forward_account_id) = true;",
+	))
+	assertNoGeneratedPolicy := func() {
+		t.Helper()
+		path := filepath.Join(project, "api", "gen", "go", "svcforge", "gateway", "v1", "policy.pb.go")
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("generated local copy of framework policy types: %v", err)
+		}
+	}
+	run(project, "buf", "generate")
+	assertNoGeneratedPolicy()
+
+	// An older Buf template has no exclusion rule or schema. The CLI installs
+	// the schema and keeps it as an import without rewriting the template.
+	rewriteFile(t, bufConfig, strings.NewReplacer("inputs:\n  - directory: .\n    exclude_paths:\n      - "+gatewaypolicy.ProjectPath+"\n", ""))
+	if err := os.Remove(policyPath); err != nil {
+		t.Fatal(err)
+	}
 	run(project, cli, "proto", "gen")
+	assertPolicy()
+	assertNoGeneratedPolicy()
+	const excludedProto = "api/proto/skip/v1/skip.proto"
+	path := filepath.Join(project, excludedProto)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`syntax = "proto3"; package skip.v1; option go_package = "demo/api/gen/go/skip/v1"; message Skip {}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	bufData, err := os.ReadFile(bufConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bufData = append(bufData, []byte("inputs:\n  - directory: .\n    exclude_paths:\n      - "+excludedProto+"\n")...)
+	if err := os.WriteFile(bufConfig, bufData, 0600); err != nil {
+		t.Fatal(err)
+	}
+	run(project, cli, "proto", "gen")
+	if _, err := os.Stat(filepath.Join(project, "api/gen/go/skip/v1/skip.pb.go")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Buf generated a file excluded by the project: %v", err)
+	}
+	assertNoGeneratedPolicy()
+	if got, err := os.ReadFile(bufConfig); err != nil || string(got) != string(bufData) {
+		t.Fatalf("proto gen modified buf.gen.yaml: %v", err)
+	}
 	run(project, cli, "add", "service", "order-service")
 	run(project, cli, "proto", "gen")
 	run(project, "go", "mod", "tidy")

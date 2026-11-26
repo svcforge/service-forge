@@ -25,10 +25,20 @@ type ServerConfig struct {
 }
 
 type GRPCConfig struct {
-	PublishRoutes bool   `yaml:"publish_routes" json:"publish_routes"`
-	ListenIP      string `yaml:"listen_ip" json:"listen_ip"`
-	RegisterIP    string `yaml:"register_ip" json:"register_ip"`
-	Port          int    `yaml:"port" json:"port"`
+	RoutePolicy   *PublishedRoutePolicy `yaml:"route_policy" json:"route_policy,omitempty"`
+	PublishRoutes bool                  `yaml:"publish_routes" json:"publish_routes"`
+	ListenIP      string                `yaml:"listen_ip" json:"listen_ip"`
+	RegisterIP    string                `yaml:"register_ip" json:"register_ip"`
+	Port          int                   `yaml:"port" json:"port"`
+}
+
+// PublishedRoutePolicy travels with a service's annotated routes. Secrets
+// are named here and resolved locally by the gateway.
+type PublishedRoutePolicy struct {
+	Prefix        string               `yaml:"prefix" json:"prefix"`
+	PublicRPCs    []string             `yaml:"public_rpcs" json:"public_rpcs,omitempty"`
+	JWTSecretEnv  string               `yaml:"jwt_secret_env" json:"jwt_secret_env,omitempty"`
+	ForwardClaims []ClaimForwardConfig `yaml:"forward_claims" json:"forward_claims,omitempty"`
 }
 
 type GatewayConfig struct {
@@ -41,14 +51,14 @@ type GatewayConfig struct {
 }
 
 type DynamicRoutesConfig struct {
-	Services     map[string]string `yaml:"services" json:"services"`
-	PollInterval time.Duration     `yaml:"poll_interval" json:"poll_interval"`
-	Timeout      time.Duration     `yaml:"timeout" json:"timeout"`
-	Plugins []GatewayPluginConfig `yaml:"plugins" json:"plugins"`
-	PublicRPCs []string `yaml:"public_rpcs" json:"public_rpcs"`
-	ForwardClaims []ClaimForwardConfig `yaml:"forward_claims" json:"forward_claims"`
+	Disabled      bool                  `yaml:"disabled" json:"disabled"`
+	Services      map[string]string     `yaml:"services" json:"services"`
+	PollInterval  time.Duration         `yaml:"poll_interval" json:"poll_interval"`
+	Timeout       time.Duration         `yaml:"timeout" json:"timeout"`
+	Plugins       []GatewayPluginConfig `yaml:"plugins" json:"plugins"`
+	PublicRPCs    []string              `yaml:"public_rpcs" json:"public_rpcs"`
+	ForwardClaims []ClaimForwardConfig  `yaml:"forward_claims" json:"forward_claims"`
 }
-
 type GatewayRouteConfig struct {
 	Name     string                `yaml:"name" json:"name"`
 	Method   string                `yaml:"method" json:"method"`

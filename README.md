@@ -605,6 +605,96 @@ The command checks that the current project has the basic Service Forge layout:
 
 ## Publish Gateway Routes From Services
 
+### Protobuf-only routes
+
+Services and gateways use the same Consul catalog. Once the service has
+registered its protobuf handlers, Service Forge automatically publishes its
+`google.api.http` mappings. The gateway discovers the routes when matching
+instances become healthy. Service and gateway YAML can omit all route settings.
+
+Protected RPCs use bearer JWT with the gateway's `JWT_SECRET` environment
+variable. Import `svcforge/gateway/v1/policy.proto` to explicitly allow
+anonymous access and forward verified account IDs:
+
+```protobuf
+import "google/api/annotations.proto";
+import "svcforge/gateway/v1/policy.proto";
+
+service AccountService {
+  option (svcforge.gateway.v1.forward_account_id) = true;
+  rpc Login(LoginRequest) returns (LoginResponse) {
+    option (google.api.http) = { post: "/api/v1/auth/login" body: "*" };
+    option (svcforge.gateway.v1.allow_anonymous) = true;
+  }
+  rpc Profile(ProfileRequest) returns (ProfileResponse) {
+    option (google.api.http) = { get: "/api/v1/users/me" };
+  }
+}
+```
+
+The `forward_account_id` option requires the authenticated `account_id`
+claim and forwards it as `x-account-id` on protected RPCs. Use
+`allow_anonymous` only for RPCs that allow anonymous callers at the gateway,
+including streams that authenticate their own initial frame. RPCs without an
+HTTP mapping stay internal. `svcforge new` installs the shared schema, and
+`svcforge proto gen` supplies it to existing projects that use `api/proto`.
+The framework provides the generated Go policy types.
+
+To enable this mode in a service project:
+
+1. Configure the `registry: consul` runtime component in the gateway and
+   service, using the same Consul address. Set `grpc.register_ip` when the
+   wildcard bind address would otherwise advertise an unreachable host.
+2. Add `buf.build/googleapis/googleapis` to your Buf v2 dependencies and run
+   `buf dep update`.
+3. Configure local Go and gRPC Buf plugins and run `svcforge proto gen`.
+   It installs the shared policy schema if missing and passes it to Buf as
+   an import only. Implement and register the gRPC handler, then rebuild
+   and restart just that service.
+4. Call the new HTTP route through the existing gateway once Consul reports
+   the matching revision healthy.
+
+Use Consul ACLs to limit each service to its own catalog and registration keys.
+Only trusted publishers should have access to the gateway's route catalog.
+
+### Service-owned route discovery
+
+When the gateway uses the Consul adapter, it can discover manifests with
+service-owned policies without a `gateway.dynamic_routes` section. Keep the
+Consul runtime component configured and put mappings in the service's proto
+files as described below. Put authentication and claim forwarding in the
+service's configuration:
+
+```yaml
+grpc:
+  publish_routes: true
+  route_policy:
+    prefix: /api/v1/orders
+    public_rpcs:
+      - /order.v1.OrderService/GetPublicCatalog
+    jwt_secret_env: ORDERS_JWT_SECRET
+    forward_claims:
+      - claim: account_id
+        header: x-account-id
+        required: true
+```
+
+Set `ORDERS_JWT_SECRET` in the gateway process environment. The published
+manifest contains the variable name. Use `JWT_SECRET` or a service-specific
+name ending in `_JWT_SECRET`. Published claim policies forward verified claims.
+RPCs outside `public_rpcs` require JWT. Global gateway plugins also apply.
+
+Enable Consul ACLs in shared deployments. Restrict service writes to their own
+manifest keys and service registrations. Give the gateway read access to the
+manifest prefix and health catalog. Store only gateway-trusted publishers in
+this catalog. The gateway rejects overlapping routes from different services,
+and activates a manifest only when a healthy instance advertises its revision.
+In discovery mode, it skips legacy manifests that lack both a service-owned
+policy and the protobuf-only publication marker.
+
+### Gateway-managed route policies
+
+Use the following explicit allowlist to retain gateway-managed policies.
 A gRPC service can publish its HTTP mappings and protobuf descriptors to
 Consul. The gateway periodically reloads those mappings and uses them to call
 unary RPCs or bridge bidirectional RPCs over WebSocket. After a service has been enabled on the gateway, adding an annotated

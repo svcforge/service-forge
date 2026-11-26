@@ -8,6 +8,8 @@ import (
 	"strings"
 	"text/template"
 	"unicode"
+
+	gatewaypolicy "github.com/svcforge/service-forge/api/proto/svcforge/gateway/v1"
 )
 
 type ProjectOptions struct {
@@ -44,6 +46,9 @@ func GenerateProject(root string, opts ProjectOptions) error {
 		opts.ServiceName = "example-service"
 	}
 	base := filepath.Join(root, opts.Name)
+	if err := EnsureGatewayPolicy(base); err != nil {
+		return err
+	}
 	if opts.Replace == "" {
 		opts.Replace = detectLocalReplace(root, base)
 	}
@@ -216,6 +221,10 @@ plugins:
   - remote: buf.build/grpc/go
     out: api/gen/go
     opt: paths=source_relative
+inputs:
+  - directory: .
+    exclude_paths:
+      - ` + gatewaypolicy.ProjectPath + `
 `
 
 const projectReadme = `# {{ .Name }}
