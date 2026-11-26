@@ -1,5 +1,21 @@
 # Service Forge changelog
 
+## v0.1.0-preview.2 — November 26, 2026
+
+- gRPC services can publish annotated HTTP routes and protobuf descriptors to
+  Consul. Enable `grpc.publish_routes` and set `grpc.register_ip` when the
+  bind address differs from the reachable service address.
+- Gateways can allow specific services and path prefixes, poll for changes,
+  and atomically activate a revision once matching instances are healthy.
+  An invalid manifest leaves the previous routing snapshot active.
+- Dynamic forwarding supports unary HTTP/JSON and bidirectional WebSocket
+  routes. Existing static routes take precedence. Literal paths take priority
+  over parameter templates.
+- Dynamic route policies support scoped plugins, explicit public RPCs and JWT
+  claim forwarding. Global gateway plugins also apply to dynamic endpoints.
+- See [Publish Gateway Routes From Services](README.md#publish-gateway-routes-from-services)
+  for configuration and the supported annotation subset.
+
 ## v0.1.0-preview.1 — November 26, 2026
 
 This preview improves startup failure reporting, runtime cleanup and gRPC

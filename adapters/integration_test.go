@@ -158,6 +158,21 @@ func TestConsulIntegration(t *testing.T) {
 	if len(found) != 0 {
 		t.Fatalf("resolved deregistered service: %+v", found)
 	}
+
+	key := "svcforge/routes/v1/" + id
+	t.Cleanup(func() {
+		if _, err := client.KV().Delete(key, nil); err != nil {
+			t.Error(err)
+		}
+	})
+	for _, revision := range []string{"first", "first", "second"} {
+		requireSuccess(t, adapter.PublishRoutes(ctx, id, []byte(revision)))
+		data, err := adapter.LoadRoutes(ctx, id)
+		requireSuccess(t, err)
+		if string(data) != revision {
+			t.Fatalf("route manifest = %q, want %q", data, revision)
+		}
+	}
 }
 
 type traceReceiver struct {

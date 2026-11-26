@@ -38,7 +38,7 @@ Client -> REST/JSON Gateway -> gRPC Services -> Ports -> Adapters
 Install the current preview with Go 1.25 or later. See the [changelog](CHANGELOG.md) for release and upgrade details.
 
 ```bash
-go install github.com/svcforge/service-forge/cmd/svcforge@v0.1.0-preview.1
+go install github.com/svcforge/service-forge/cmd/svcforge@v0.1.0-preview.2
 ```
 
 While developing Service Forge locally, run the CLI from this repository:
@@ -88,7 +88,7 @@ the framework checkout. The version pin makes the generated project reproducible
 svcforge new demo
 cd demo
 buf generate
-go get github.com/svcforge/service-forge@v0.1.0-preview.1
+go get github.com/svcforge/service-forge@v0.1.0-preview.2
 go mod tidy
 ```
 
@@ -602,6 +602,79 @@ The command checks that the current project has the basic Service Forge layout:
 - `go.mod`
 - `config/`
 - `api/proto/`
+
+## Publish Gateway Routes From Services
+
+A gRPC service can publish its HTTP mappings and protobuf descriptors to
+Consul. The gateway periodically reloads those mappings and uses them to call
+unary RPCs or bridge bidirectional RPCs over WebSocket. After a service has been enabled on the gateway, adding an annotated
+RPC only requires generating, building and restarting that service.
+
+1. Use the same Consul instance for both processes. In the existing
+   `runtime.components` list, set `registry` to `provider: consul`, and
+   configure `modules.consul.address` with an address both processes can reach.
+2. Set `grpc.publish_routes: true` in the **service's** configuration.
+   When the listening address is a wildcard and the processes run in different
+   containers, set `grpc.register_ip` to an address reachable by Consul and the
+   gateway.
+3. On the **gateway**, allow the service and its HTTP path prefix. The map key
+   is the service's configured name:
+
+   ```yaml
+   gateway:
+     dynamic_routes:
+       poll_interval: 2s
+       timeout: 3s
+       services:
+         order-service: /api/v1/orders
+   ```
+
+4. Declare an HTTP mapping in the service's protobuf definition:
+
+   ```protobuf
+   import "google/api/annotations.proto";
+
+   service OrderService {
+     rpc GetOrder(GetOrderRequest) returns (GetOrderResponse) {
+       option (google.api.http) = {
+         get: "/api/v1/orders/{id}"
+       };
+     }
+   }
+   ```
+
+   Add `buf.build/googleapis/googleapis` to the Buf v2 configuration's
+   `deps`, run `buf dep update`, then run `svcforge proto gen`. Implement the
+   RPC and register its protobuf service with the gRPC server as usual.
+   Publishing collects annotations only from services registered on that server.
+
+The gateway applies global plugins to dynamic routes. Existing static routes
+take precedence. More specific literal paths take priority over parameter
+templates. For example, `/users/search` matches before `/users/{id}`.
+
+Use `gateway.dynamic_routes.plugins` for middleware that only applies to
+dynamic routes, and `gateway.dynamic_routes.forward_claims` to forward verified
+claims as gRPC metadata. List fully qualified RPCs in
+`gateway.dynamic_routes.public_rpcs` to exempt them from these scoped policies.
+Global middleware also applies to those RPCs. List a WebSocket RPC there only
+when the backend authenticates its stream independently.
+
+Services publish under
+`svcforge/routes/v1/<service-name>` in Consul KV, so Consul credentials must
+allow the service to publish its own key and the gateway to read its allowed
+keys. An update activates when a healthy instance advertises the matching
+manifest revision. The gateway keeps the previous revision while the new
+instances become healthy. Invalid manifests and conflicting dynamic routes
+leave the last valid snapshot active. Removing an annotation and publishing the
+updated service removes its mapping when the new revision activates.
+
+Unary routes support literal paths and scalar `{field}` segments. The HTTP
+body can be omitted or mapped to `*`. Annotate a bidirectional RPC with a
+literal GET path to expose it as a WebSocket with text JSON and binary protobuf
+frames. Server-streaming SSE remains supported by static routes. Custom verbs
+and wildcard templates are outside the dynamic mapping subset. The KV key stores
+the last successfully published manifest for that service. Start the intended
+revision last during deployment or rollback if different revisions are started.
 
 ## Benchmarks
 

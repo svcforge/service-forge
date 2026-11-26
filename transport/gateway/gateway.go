@@ -37,6 +37,7 @@ type Gateway struct {
 	address          string
 	listener         net.Listener
 	dialer           *grpcclient.Dialer
+	dynamic          *dynamicRoutes
 }
 
 func New(routes ...RouteFunc) *Gateway {
@@ -67,6 +68,9 @@ func (g *Gateway) Init(ctx context.Context, runtime module.Runtime) error {
 	}
 	for _, route := range g.routes {
 		route(g.app, g)
+	}
+	if err := g.mountDynamicRoutes(runtime, cfg.Gateway.DynamicRoutes); err != nil {
+		return errors.Join(err, g.closeProxyConnections())
 	}
 	runtime.Set("gateway", g)
 	runtime.Set("fiber", g.app)
@@ -207,6 +211,13 @@ func (g *Gateway) Start(ctx context.Context) error {
 			g.logger.Error("gateway stopped serving", "error", err)
 		}
 	}()
+	if g.dynamic != nil {
+		g.dynamic.start(func(err error) {
+			if g.logger != nil {
+				g.logger.Warn("dynamic route refresh failed", "error", err)
+			}
+		})
+	}
 	return nil
 }
 
@@ -219,6 +230,9 @@ func (g *Gateway) Stop(ctx context.Context) error {
 			err = errors.Join(err, closeErr)
 		}
 		g.listener = nil
+	}
+	if g.dynamic != nil {
+		err = errors.Join(err, g.dynamic.stop(ctx))
 	}
 	return errors.Join(err, g.closeProxyConnections())
 }

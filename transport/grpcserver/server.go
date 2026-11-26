@@ -13,25 +13,30 @@ import (
 	sferrors "github.com/svcforge/service-forge/core/errors"
 	"github.com/svcforge/service-forge/core/module"
 	"github.com/svcforge/service-forge/ports/registry"
+	"github.com/svcforge/service-forge/transport/routeconfig"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/protobuf/reflect/protoregistry"
 )
 
 type RegisterFunc func(*grpc.Server)
 type Option func(*Module)
 
 type Module struct {
-	serviceName string
-	address     string
-	port        int
-	server      *grpc.Server
-	health      *health.Server
-	serving     atomic.Bool
-	registers   []RegisterFunc
-	registrar   registry.Registrar
-	serviceID   string
-	logger      module.Logger
+	serviceName   string
+	address       string
+	registerIP    string
+	routeCatalog  registry.RouteCatalog
+	routeManifest []byte
+	port          int
+	server        *grpc.Server
+	health        *health.Server
+	serving       atomic.Bool
+	registers     []RegisterFunc
+	registrar     registry.Registrar
+	serviceID     string
+	logger        module.Logger
 }
 
 func NewModule(registers ...RegisterFunc) *Module {
@@ -51,6 +56,7 @@ func (m *Module) Init(ctx context.Context, app module.Runtime) error {
 	m.logger = app.Logger().With("source", "transport", "component", "grpcserver")
 	m.serviceName = cfg.App.Name
 	m.address = cfg.GRPC.ListenIP
+	m.registerIP = cfg.GRPC.RegisterIP
 	m.port = cfg.GRPC.Port
 	if m.address == "" {
 		m.address = "0.0.0.0"
@@ -71,6 +77,23 @@ func (m *Module) Init(ctx context.Context, app module.Runtime) error {
 			m.registrar = registrar
 		}
 	}
+	if cfg.GRPC.PublishRoutes {
+		raw, _ := app.Get(registry.RouteCatalogKey)
+		catalog, ok := raw.(registry.RouteCatalog)
+		if !ok || m.registrar == nil {
+			return fmt.Errorf("publishing routes requires a route catalog and service registrar")
+		}
+		serviceInfo := m.server.GetServiceInfo()
+		names := make([]string, 0, len(serviceInfo))
+		for name := range serviceInfo {
+			names = append(names, name)
+		}
+		manifest, err := routeconfig.Encode(names, protoregistry.GlobalFiles)
+		if err != nil {
+			return fmt.Errorf("encode routes: %w", err)
+		}
+		m.routeCatalog, m.routeManifest = catalog, manifest
+	}
 	app.Set("grpc_server", m.server)
 	return nil
 }
@@ -82,7 +105,14 @@ func (m *Module) Start(ctx context.Context) error {
 	}
 	if m.registrar != nil {
 		serviceID := fmt.Sprintf("%s-%s", m.serviceName, uuid.NewString())
-		registerAddr := hostForRegistry(m.address)
+		registerAddr := m.registerIP
+		if registerAddr == "" {
+			registerAddr = hostForRegistry(m.address)
+		}
+		metadata := map[string]string{"transport": "grpc"}
+		if m.routeCatalog != nil {
+			metadata[registry.RouteRevisionMetadata] = routeconfig.Revision(m.routeManifest)
+		}
 		if err := m.registrar.Register(ctx, registry.ServiceInstance{
 			ID:       serviceID,
 			Name:     m.serviceName,
@@ -90,9 +120,14 @@ func (m *Module) Start(ctx context.Context) error {
 			Port:     m.port,
 			Protocol: "grpc",
 			Tags:     []string{"grpc"},
-			Metadata: map[string]string{"transport": "grpc"},
+			Metadata: metadata,
 		}); err != nil {
 			return errors.Join(err, listener.Close())
+		}
+		if m.routeCatalog != nil {
+			if err := m.routeCatalog.PublishRoutes(ctx, m.serviceName, m.routeManifest); err != nil {
+				return errors.Join(fmt.Errorf("publish routes: %w", err), m.registrar.Deregister(ctx, serviceID), listener.Close())
+			}
 		}
 		m.serviceID = serviceID
 	}
