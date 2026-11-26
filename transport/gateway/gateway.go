@@ -29,15 +29,18 @@ type HandlerFunc func(ctx context.Context, c *fiber.Ctx) (any, error)
 type RouteFunc func(app *fiber.App, gateway *Gateway)
 
 type Gateway struct {
-	app              *fiber.App
-	logger           module.Logger
-	routes           []RouteFunc
-	configuredRoutes []*proxyRoute
-	globalSkips      []routePluginSkip
-	address          string
-	listener         net.Listener
-	dialer           *grpcclient.Dialer
-	dynamic          *dynamicRoutes
+	app                 *fiber.App
+	logger              module.Logger
+	routes              []RouteFunc
+	configuredRoutes    []*proxyRoute
+	globalSkips         []routePluginSkip
+	address             string
+	listener            net.Listener
+	dialer              *grpcclient.Dialer
+	dynamic             *dynamicRoutes
+	globalJWT           bool
+	staticRoutes        []fiber.Route
+	hasStaticMiddleware bool
 }
 
 func New(routes ...RouteFunc) *Gateway {
@@ -63,12 +66,22 @@ func (g *Gateway) Init(ctx context.Context, runtime module.Runtime) error {
 	if err := g.mountGlobalPlugins(cfg); err != nil {
 		return err
 	}
+	rawCatalog, _ := runtime.Get(registry.RouteCatalogKey)
+	_, discovery := rawCatalog.(registry.RouteCatalogLister)
+	allowAnonymous := discovery && !cfg.Gateway.DynamicRoutes.Disabled && len(cfg.Gateway.DynamicRoutes.Services) == 0
+	middlewareCount := 0
+	if allowAnonymous {
+		g.app.Use(g.guardAnonymousRoute)
+		middlewareCount = len(g.app.GetRoutes()) - len(g.app.GetRoutes(true))
+	}
 	if err := g.mountConfiguredRoutes(ctx, cfg, runtime); err != nil {
 		return errors.Join(err, g.closeProxyConnections())
 	}
 	for _, route := range g.routes {
 		route(g.app, g)
 	}
+	g.staticRoutes = g.app.GetRoutes(true)
+	g.hasStaticMiddleware = len(g.app.GetRoutes())-len(g.staticRoutes) > middlewareCount
 	if err := g.mountDynamicRoutes(runtime, cfg.Gateway.DynamicRoutes); err != nil {
 		return errors.Join(err, g.closeProxyConnections())
 	}

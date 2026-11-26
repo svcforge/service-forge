@@ -35,10 +35,11 @@ var dynamicParameter = regexp.MustCompile(`^\{[A-Za-z_][A-Za-z0-9_]*\}$`)
 
 type dynamicRoute struct {
 	routeconfig.Route
-	parts  []string
-	public bool
-	auth   fiber.Handler
-	claims *claimForwarder
+	parts     []string
+	public    bool
+	auth      fiber.Handler
+	claims    *claimForwarder
+	automatic bool
 }
 
 type dynamicService struct {
@@ -79,6 +80,7 @@ type dynamicRoutes struct {
 	claims        *claimForwarder
 	public        map[string]bool
 	logger        module.Logger
+	globalJWT     bool
 }
 
 func (g *Gateway) mountDynamicRoutes(runtime module.Runtime, cfg config.DynamicRoutesConfig) error {
@@ -123,7 +125,7 @@ func (g *Gateway) mountDynamicRoutes(runtime module.Runtime, cfg config.DynamicR
 		}
 	}
 	dynamic := &dynamicRoutes{cfg: cfg, catalog: catalog, lister: lister, pluginContext: g.pluginBuildContext(runtime.Config()), resolver: resolver, dialer: grpcclient.NewDialer(nil),
-		claims: buildClaimForwarder(cfg.ForwardClaims), public: make(map[string]bool), logger: g.logger}
+		claims: buildClaimForwarder(cfg.ForwardClaims), public: make(map[string]bool), logger: g.logger, globalJWT: g.globalJWT}
 	for _, rpc := range cfg.PublicRPCs {
 		normalized, _, err := normalizeRPC(rpc)
 		if err != nil {
@@ -135,7 +137,7 @@ func (g *Gateway) mountDynamicRoutes(runtime module.Runtime, cfg config.DynamicR
 	g.dynamic = dynamic
 	// This fallback runs after static routes and the gateway's global plugins.
 	g.app.Use(func(c *fiber.Ctx) error {
-		match, ok := dynamic.selectRoute(c)
+		match, ok := dynamic.requestRoute(c)
 		if !ok {
 			return c.Next()
 		}
@@ -309,7 +311,7 @@ func (d *dynamicRoutes) compileRoutes(data []byte, prefix string) ([]dynamicRout
 	if d.lister != nil {
 		switch {
 		case automatic:
-			secretEnv = "JWT_SECRET"
+			// Authentication comes from the gateway global chain.
 		case spec.Policy != nil:
 			prefix = spec.Policy.Prefix
 			if !validDynamicPrefix(prefix) {
@@ -351,8 +353,12 @@ func (d *dynamicRoutes) compileRoutes(data []byte, prefix string) ([]dynamicRout
 				return nil, fmt.Errorf("unsupported path segment %q in %s", part, route.Path)
 			}
 		}
-		entry := dynamicRoute{Route: route, parts: parts, public: isPublic(route)}
-		if d.lister != nil && !entry.public {
+		entry := dynamicRoute{Route: route, parts: parts, public: isPublic(route), automatic: automatic}
+		if automatic {
+			if !entry.public && route.ForwardAccountID && d.globalJWT {
+				entry.claims = accountClaims
+			}
+		} else if d.lister != nil && !entry.public {
 			if auth == nil {
 				if secretEnv == "" {
 					return nil, fmt.Errorf("protected route %s requires jwt_secret_env", route.RPC)
@@ -370,9 +376,6 @@ func (d *dynamicRoutes) compileRoutes(data []byte, prefix string) ([]dynamicRout
 				auth = built[0].Handler
 			}
 			entry.auth, entry.claims = auth, claims
-			if automatic && route.ForwardAccountID {
-				entry.claims = accountClaims
-			}
 		}
 		routes = append(routes, entry)
 	}

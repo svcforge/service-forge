@@ -49,7 +49,7 @@ func Factory(ctx plugin.BuildContext) (plugin.Plugin, error) {
 	if opts.audience != "" {
 		parserOptions = append(parserOptions, jwt.WithAudience(opts.audience))
 	}
-	return plugin.Plugin{Handler: func(c *fiber.Ctx) error {
+	return plugin.Plugin{Authentication: true, Handler: func(c *fiber.Ctx) error {
 		token, ok := extractToken(c, opts.header, opts.scheme)
 		if !ok {
 			return plugin.WriteError(c, sferrors.New(sferrors.CodeUnauthenticated, "missing bearer token"))

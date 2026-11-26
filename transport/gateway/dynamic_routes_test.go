@@ -138,6 +138,11 @@ func testDynamicRoutePublicationAndReload(t *testing.T, mode string) {
 	cfg.Gateway.Plugins = []config.GatewayPluginConfig{
 		{Name: "api_key", Config: map[string]any{"keys": []any{"test-key"}}},
 	}
+	if mode == "proto" {
+		cfg.Gateway.Plugins = append(cfg.Gateway.Plugins, config.GatewayPluginConfig{
+			Name: "jwt", Config: map[string]any{"secret": "only-for-this-test"},
+		})
+	}
 	gatewayRuntime := app.New(cfg)
 	gatewayRuntime.Set(registry.RouteCatalogKey, store)
 	gatewayRuntime.Set("resolver", store)

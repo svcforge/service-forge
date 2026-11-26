@@ -25,7 +25,8 @@ func (g *Gateway) mountGlobalPlugins(cfg *config.Config) error {
 	}
 	for _, item := range built {
 		if item.Handler != nil {
-			g.app.Use(g.wrapGlobalPlugin(item.Name, item.Handler))
+			g.globalJWT = g.globalJWT || item.Name == "jwt"
+			g.app.Use(g.wrapGlobalPlugin(item.Name, item.Authentication, item.Handler))
 		}
 	}
 	if g.logger != nil && len(built) > 0 {

@@ -51,12 +51,12 @@ func (g *Gateway) registerPluginSkip(cfg config.GatewayRouteConfig) {
 // wrapGlobalPlugin wraps a global plugin handler so it is bypassed for requests
 // targeting a route that opted out of it. Plugins without a name (defensive) are
 // returned unwrapped.
-func (g *Gateway) wrapGlobalPlugin(name string, handler fiber.Handler) fiber.Handler {
+func (g *Gateway) wrapGlobalPlugin(name string, authentication bool, handler fiber.Handler) fiber.Handler {
 	if name == "" {
 		return handler
 	}
 	return func(c *fiber.Ctx) error {
-		if g.skipsGlobalPlugin(name, c) {
+		if (authentication && g.skipsDynamicAuthentication(c)) || g.skipsGlobalPlugin(name, c) {
 			return c.Next()
 		}
 		return handler(c)

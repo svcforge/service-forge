@@ -34,7 +34,7 @@ func Factory(ctx plugin.BuildContext) (plugin.Plugin, error) {
 	if err != nil {
 		return plugin.Plugin{}, err
 	}
-	return plugin.Plugin{Handler: func(c *fiber.Ctx) error {
+	return plugin.Plugin{Authentication: true, Handler: func(c *fiber.Ctx) error {
 		candidate := c.Get(header)
 		if candidate == "" && query != "" {
 			candidate = c.Query(query)

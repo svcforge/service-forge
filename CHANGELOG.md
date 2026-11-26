@@ -1,5 +1,60 @@
 # Service Forge changelog
 
+## v0.1.0-preview.3 — November 26, 2026
+
+### Protobuf route discovery
+
+- Services using Consul automatically publish registered RPCs with
+  `google.api.http` annotations. Gateways discover the published manifests
+  and activate them after matching service instances become healthy. New
+  services and RPCs can be deployed without editing gateway routing YAML.
+- Protobuf annotations cover unary HTTP/JSON and bidirectional WebSocket
+  mappings. RPCs without an HTTP mapping remain internal. Static routes still
+  take precedence when the same request matches both routing modes.
+- The gateway keeps the last valid snapshot when a candidate manifest is
+  invalid or dynamic routes conflict. In shared environments, give each
+  trusted service write access to its own Consul keys and the gateway read
+  access to the route catalog and service health data.
+
+### Authentication
+
+- Protobuf-only routes inherit enabled authentication entries from
+  `gateway.plugins`. The gateway accepts unauthenticated requests when
+  no global authentication plugin is enabled. Enable `jwt` or `api_key` to
+  protect automatically published routes.
+- The `allow_anonymous` method option bypasses global authentication for that
+  dynamic route. Logging, rate limiting and other global middleware still
+  run. Matching static routes retain their configured authentication.
+- The `forward_account_id` service option forwards a verified JWT
+  `account_id` as `x-account-id` when global JWT is enabled. A protected
+  endpoint using this option requires the claim.
+- To keep existing automatically published routes protected during upgrade,
+  explicitly configure the desired global authentication plugin. For JWT,
+  configure its secret from the gateway environment, such as `JWT_SECRET`.
+  Gateway-managed static routes and explicit legacy policy modes remain
+  available.
+
+### CLI and upgrade
+
+- `svcforge new` includes the shared gateway `policy.proto`.
+  `svcforge proto gen` supplies the schema to existing projects with the
+  standard `api/proto` layout and preserves their Buf path exclusions.
+  An incompatible existing schema is reported and preserved.
+- Install the CLI with
+  `go install github.com/svcforge/service-forge/cmd/svcforge@v0.1.0-preview.3`.
+  Update applications with
+  `go get github.com/svcforge/service-forge@v0.1.0-preview.3` and `go mod tidy`.
+- See [Publish Gateway Routes From Services](README.md#publish-gateway-routes-from-services)
+  for a deployment walkthrough and examples.
+
+### Verification
+
+- The full framework suite passed with the Go race detector, including
+  CLI scaffolding, generated-project end-to-end tests, external adapters,
+  live route updates, global authentication and anonymous route handling.
+- An isolated application deployment verified 11 HTTP endpoints and
+  authenticated WebSocket communication through Consul-discovered routes.
+
 ## v0.1.0-preview.2 — November 26, 2026
 
 - gRPC services can publish annotated HTTP routes and protobuf descriptors to

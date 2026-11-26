@@ -28,6 +28,8 @@ type Plugin struct {
 	// entry. Lets the caller correlate a built handler back to its config (for
 	// example to honour a route's skip list).
 	Name string
+	// Authentication lets explicit anonymous protobuf routes bypass this plugin.
+	Authentication bool
 	// Handler is mounted on the request chain. May be nil for plugins that
 	// only mount routes (for example a metrics endpoint).
 	Handler fiber.Handler

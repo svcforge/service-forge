@@ -38,7 +38,7 @@ Client -> REST/JSON Gateway -> gRPC Services -> Ports -> Adapters
 Install the current preview with Go 1.25 or later. See the [changelog](CHANGELOG.md) for release and upgrade details.
 
 ```bash
-go install github.com/svcforge/service-forge/cmd/svcforge@v0.1.0-preview.2
+go install github.com/svcforge/service-forge/cmd/svcforge@v0.1.0-preview.3
 ```
 
 While developing Service Forge locally, run the CLI from this repository:
@@ -88,7 +88,7 @@ the framework checkout. The version pin makes the generated project reproducible
 svcforge new demo
 cd demo
 buf generate
-go get github.com/svcforge/service-forge@v0.1.0-preview.2
+go get github.com/svcforge/service-forge@v0.1.0-preview.3
 go mod tidy
 ```
 
@@ -612,9 +612,22 @@ registered its protobuf handlers, Service Forge automatically publishes its
 `google.api.http` mappings. The gateway discovers the routes when matching
 instances become healthy. Service and gateway YAML can omit all route settings.
 
-Protected RPCs use bearer JWT with the gateway's `JWT_SECRET` environment
-variable. Import `svcforge/gateway/v1/policy.proto` to explicitly allow
-anonymous access and forward verified account IDs:
+Protobuf-only routes inherit the enabled authentication plugins in
+`gateway.plugins`. With no authentication plugin enabled, the gateway
+accepts requests without credentials. For bearer JWT, configure:
+
+```yaml
+gateway:
+  plugins:
+    - name: jwt
+      config:
+        secret: "${JWT_SECRET}"
+```
+
+The built-in `api_key` plugin is also supported. Custom plugin factories may
+set `plugin.Plugin.Authentication` to mark an authentication handler.
+Import `svcforge/gateway/v1/policy.proto` to explicitly allow anonymous
+access and forward verified account IDs:
 
 ```protobuf
 import "google/api/annotations.proto";
@@ -632,10 +645,11 @@ service AccountService {
 }
 ```
 
-The `forward_account_id` option requires the authenticated `account_id`
-claim and forwards it as `x-account-id` on protected RPCs. Use
-`allow_anonymous` only for RPCs that allow anonymous callers at the gateway,
-including streams that authenticate their own initial frame. RPCs without an
+With global JWT enabled, `forward_account_id` requires the authenticated
+`account_id` claim and forwards it as `x-account-id` on protected RPCs.
+`allow_anonymous` skips global authentication plugins for that dynamic RPC.
+Other global middleware still runs, and matching static routes retain
+their own authentication policy. RPCs without an
 HTTP mapping stay internal. `svcforge new` installs the shared schema, and
 `svcforge proto gen` supplies it to existing projects that use `api/proto`.
 The framework provides the generated Go policy types.
